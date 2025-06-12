@@ -42,6 +42,7 @@ __all__ = (
     "SPPELAN",
     "CBFuse",
     "CBLinear",
+    "C3k",
     "C3k2",
     "C2fPSA",
     "C2PSA",
@@ -52,6 +53,8 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "ABlock",
+    "A2C2f",
 )
 
 

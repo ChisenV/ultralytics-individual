@@ -15,6 +15,69 @@ from .metrics import bbox_iou, probiou
 from .tal import bbox2dist
 
 
+class SlideLoss(nn.Module):
+    def __init__(self, loss_fcn):
+        super(SlideLoss, self).__init__()
+        self.loss_fcn = loss_fcn
+        self.reduction = loss_fcn.reduction
+        self.loss_fcn.reduction = 'none'  # required to apply SL to each element
+
+    def forward(self, pred, true, auto_iou=0.5):
+        loss = self.loss_fcn(pred, true)
+        if auto_iou < 0.2:
+            auto_iou = 0.2
+        b1 = true <= auto_iou - 0.1
+        a1 = 1.0
+        b2 = (true > (auto_iou - 0.1)) & (true < auto_iou)
+        a2 = torch.exp(1.0 - auto_iou)
+        b3 = true >= auto_iou
+        a3 = torch.exp(-(true - 1.0))
+        modulating_weight = a1 * b1 + a2 * b2 + a3 * b3
+        loss *= modulating_weight
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+
+class EMASlideLoss:
+    def __init__(self, loss_fcn, decay=0.999, tau=2000):
+        super(EMASlideLoss, self).__init__()
+        self.loss_fcn = loss_fcn
+        self.reduction = loss_fcn.reduction
+        self.loss_fcn.reduction = 'none'  # required to apply SL to each element
+        self.decay = lambda x: decay * (1 - torch.exp(-x / tau))
+        self.is_train = True
+        self.updates = 0
+        self.iou_mean = 1.0
+    
+    def __call__(self, pred, true, auto_iou=0.5):
+        if self.is_train and auto_iou != -1:
+            self.updates += 1
+            d = self.decay(self.updates)
+            self.iou_mean = d * self.iou_mean + (1 - d) * float(auto_iou.detach())
+        auto_iou = self.iou_mean
+        loss = self.loss_fcn(pred, true)
+        if auto_iou < 0.2:
+            auto_iou = 0.2
+        b1 = true <= auto_iou - 0.1
+        a1 = 1.0
+        b2 = (true > (auto_iou - 0.1)) & (true < auto_iou)
+        a2 = torch.exp(1.0 - auto_iou)
+        b3 = true >= auto_iou
+        a3 = torch.exp(-(true - 1.0))
+        modulating_weight = a1 * b1 + a2 * b2 + a3 * b3
+        loss *= modulating_weight
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+
+
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
@@ -172,6 +235,91 @@ class RotatedBboxLoss(BboxLoss):
         return loss_iou, loss_dfl
 
 
+class RotatedBboxLossWithAngle(BboxLoss):
+    def __init__(self, reg_max=16, angle_weight=1.0, square_angle_weight=5.0, aspect_ratio_thresh=1.2,
+                 angle_loss_method="cos+sin", alpha=0.5):
+        """
+        Args:
+            reg_max: The maximum value of DFL regression
+            angle_weight: Conventional Angle loss weight
+            square_angle_weight: The angular loss weight of targets with similar length and width
+            aspect_ratio_thresh: Determine the threshold for similar lengths and widths (max(w,h)/min(w,h) < thresh)
+            angle_loss_method: Calculation method of angular loss, option "cos", "cos+sin", "squared"
+            alpha: Balance the contributions of cos and sin to avoid dimensional differences
+        """
+        super().__init__(reg_max)
+        self.angle_weight = angle_weight
+        self.square_angle_weight = square_angle_weight
+        self.aspect_ratio_thresh = aspect_ratio_thresh
+        self.angle_loss_method = angle_loss_method
+        self.alpha = alpha
+
+    def angle_loss(self, pred_angles, target_angles, method='cos+sin', is_square=False):
+        angle_diff = pred_angles - target_angles
+        angle_diff = (angle_diff + torch.pi) % (2 * torch.pi) - torch.pi  # Constrained to [-π, π]
+
+        if method == 'cos':
+            return 1 - torch.cos(angle_diff)
+        elif method == 'cos+sin':
+            # Balance the contributions of cos and sin to avoid dimensional differences
+            if is_square:
+                # cos component < sin component
+                return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
+            else:
+                return self.alpha * (1 - torch.cos(angle_diff)) + (1 - self.alpha) * torch.sin(angle_diff).abs()
+        elif method == 'squared':
+            # The square form of the Euclidean angular distance
+            return 2 * (1 - torch.cos(angle_diff))  # equivalent: (angle_diff.sin()**2 + (1-angle_diff.cos())**2)
+
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+        # Flatten masks and select foreground
+        fg_mask_flat = fg_mask.view(-1)
+        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+
+        # Get selected boxes [x,y,w,h,angle]
+        pred_bboxes_selected = pred_bboxes.view(-1, 5)[fg_mask_flat]
+        target_bboxes_selected = target_bboxes.view(-1, 5)[fg_mask_flat]
+
+        # Calculate IoU loss
+        iou = probiou(pred_bboxes_selected, target_bboxes_selected)
+        iou_loss = ((1.0 - iou) * weight).sum() / target_scores_sum
+
+        # Calculate angle loss with dynamic weighting
+        pred_angles = pred_bboxes_selected[:, 4]  # [num_selected]
+        target_angles = target_bboxes_selected[:, 4]  # [num_selected]
+
+        # 1. Calculate the Angle loss weight for targets with similar lengths and widths
+        target_wh = target_bboxes_selected[:, 2:4]  # [w,h]
+        aspect_ratio = torch.max(target_wh, dim=1)[0] / torch.min(target_wh, dim=1)[0]
+        is_square = aspect_ratio < self.aspect_ratio_thresh
+
+        # Dynamic weights: Use angle_weight for regular targets and square_angle_weight for nearly square targets
+        dynamic_weights = torch.where(
+            is_square,
+            torch.tensor(self.square_angle_weight, device=pred_angles.device),
+            torch.tensor(self.angle_weight, device=pred_angles.device)
+        )
+
+        # 2. Calculate the loss of the basic Angle (default cos+sin loss)
+        angle_loss = self.angle_loss(pred_angles, target_angles, self.angle_loss_method)
+
+        # 3. Apply dynamic weights and sample weights
+        angle_loss = (angle_loss * dynamic_weights * weight.squeeze(-1)).sum() / target_scores_sum
+
+        # Combine losses
+        total_loss = iou_loss + angle_loss
+
+        # DFL loss
+        if self.dfl_loss:
+            target_ltrb = bbox2dist(anchor_points, xywh2xyxy(target_bboxes[..., :4]), self.dfl_loss.reg_max - 1)
+            loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+            loss_dfl = loss_dfl.sum() / target_scores_sum
+        else:
+            loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+
+        return total_loss, loss_dfl
+
+
 class KeypointLoss(nn.Module):
     """Criterion class for computing keypoint losses."""
 
@@ -194,7 +342,7 @@ class KeypointLoss(nn.Module):
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
 
-    def __init__(self, model, tal_topk: int = 10):  # model must be de-paralleled
+    def __init__(self, model, tal_topk: int = 10, distill: bool = False):  # model must be de-paralleled
         """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
         device = next(model.parameters()).device  # get model device
         h = model.args  # hyperparameters
@@ -207,6 +355,7 @@ class v8DetectionLoss:
         self.no = m.nc + m.reg_max * 4
         self.reg_max = m.reg_max
         self.device = device
+        self.distill = distill
 
         self.use_dfl = m.reg_max > 1
 
@@ -294,7 +443,9 @@ class v8DetectionLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
-        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
+        if self.distill:
+            return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
 class v8SegmentationLoss(v8DetectionLoss):

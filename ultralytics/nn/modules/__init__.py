@@ -42,6 +42,7 @@ from .block import (
     C2fCIB,
     C2fPSA,
     C3Ghost,
+    C3k,
     C3k2,
     C3x,
     CBFuse,
@@ -59,6 +60,8 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    ABlock,
+    A2C2f,
 )
 from .conv import (
     CBAM,
@@ -75,6 +78,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    DSConv,
 )
 from .head import (
     OBB,
@@ -129,6 +133,7 @@ __all__ = (
     "C2",
     "C3",
     "C2f",
+    "C3k",
     "C3k2",
     "SCDown",
     "C2fPSA",
@@ -178,5 +183,7 @@ __all__ = (
     "PSA",
     "TorchVision",
     "Index",
+    "ABlock",
     "A2C2f",
+    "DSConv",
 )
