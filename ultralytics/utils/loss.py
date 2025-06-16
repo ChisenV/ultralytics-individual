@@ -147,6 +147,25 @@ class FocalLoss(nn.Module):
         return loss.mean(1).sum()
 
 
+class QualityfocalLoss(nn.Module):
+    def __init__(self, beta=2.0):
+        super().__init__()
+        self.beta = beta
+    
+    def forward(self, pred_score, gt_score, gt_target_pos_mask):
+        # negatives are supervised by 0 quality score
+        pred_sigmoid = pred_score.sigmoid()
+        scale_factor = pred_sigmoid
+        zerolabel = scale_factor.new_zeros(pred_score.shape)
+        with torch.cuda.amp.autocast(enabled=False):
+            loss = F.binary_cross_entropy_with_logits(pred_score, zerolabel, reduction='none') * scale_factor.pow(self.beta)
+        
+        scale_factor = gt_score[gt_target_pos_mask] - pred_sigmoid[gt_target_pos_mask]
+        with torch.cuda.amp.autocast(enabled=False):
+            loss[gt_target_pos_mask] = F.binary_cross_entropy_with_logits(pred_score[gt_target_pos_mask], gt_score[gt_target_pos_mask], reduction='none') * scale_factor.abs().pow(self.beta)
+        return loss
+
+
 class DFLoss(nn.Module):
     """Criterion class for computing Distribution Focal Loss (DFL)."""
 
@@ -236,8 +255,15 @@ class RotatedBboxLoss(BboxLoss):
 
 
 class RotatedBboxLossWithAngle(BboxLoss):
-    def __init__(self, reg_max=16, angle_weight=1.0, square_angle_weight=5.0, aspect_ratio_thresh=1.2,
-                 angle_loss_method="cos+sin", alpha=0.5):
+    def __init__(
+            self,
+            reg_max=16,
+            angle_weight=1.0,
+            square_angle_weight=5.0,
+            aspect_ratio_thresh=1.2,
+            angle_loss_method="cos+sin",
+            alpha=0.5
+    ):
         """
         Args:
             reg_max: The maximum value of DFL regression
@@ -254,24 +280,30 @@ class RotatedBboxLossWithAngle(BboxLoss):
         self.angle_loss_method = angle_loss_method
         self.alpha = alpha
 
-    def angle_loss(self, pred_angles, target_angles, method='cos+sin', is_square=False):
+    def angle_loss(self, pred_angles, target_angles):
         angle_diff = pred_angles - target_angles
         angle_diff = (angle_diff + torch.pi) % (2 * torch.pi) - torch.pi  # Constrained to [-π, π]
 
-        if method == 'cos':
+        if self.angle_loss_method == 'cos':
             return 1 - torch.cos(angle_diff)
-        elif method == 'cos+sin':
+        elif self.angle_loss_method == 'cos+sin':
             # Balance the contributions of cos and sin to avoid dimensional differences
-            if is_square:
-                # cos component < sin component
-                return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
-            else:
-                return self.alpha * (1 - torch.cos(angle_diff)) + (1 - self.alpha) * torch.sin(angle_diff).abs()
-        elif method == 'squared':
+            # cos component < sin component
+            return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
+        elif self.angle_loss_method == 'squared':
             # The square form of the Euclidean angular distance
             return 2 * (1 - torch.cos(angle_diff))  # equivalent: (angle_diff.sin()**2 + (1-angle_diff.cos())**2)
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def forward(
+        self,
+        pred_dist: torch.Tensor,
+        pred_bboxes: torch.Tensor,
+        anchor_points: torch.Tensor,
+        target_bboxes: torch.Tensor,
+        target_scores: torch.Tensor,
+        target_scores_sum: torch.Tensor,
+        fg_mask: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         # Flatten masks and select foreground
         fg_mask_flat = fg_mask.view(-1)
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
@@ -301,7 +333,7 @@ class RotatedBboxLossWithAngle(BboxLoss):
         )
 
         # 2. Calculate the loss of the basic Angle (default cos+sin loss)
-        angle_loss = self.angle_loss(pred_angles, target_angles, self.angle_loss_method)
+        angle_loss = self.angle_loss(pred_angles, target_angles)
 
         # 3. Apply dynamic weights and sample weights
         angle_loss = (angle_loss * dynamic_weights * weight.squeeze(-1)).sum() / target_scores_sum
@@ -806,11 +838,12 @@ class v8ClassificationLoss:
 class v8OBBLoss(v8DetectionLoss):
     """Calculates losses for object detection, classification, and box distribution in rotated YOLO models."""
 
-    def __init__(self, model):
+    def __init__(self, model, emphasize_angle=True):
         """Initialize v8OBBLoss with model, assigner, and rotated bbox loss; model must be de-paralleled."""
         super().__init__(model)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = RotatedBboxLoss(self.reg_max).to(self.device)
+        self.bbox_loss = RotatedBboxLossWithAngle(self.reg_max).to(self.device) if emphasize_angle \
+            else RotatedBboxLoss(self.reg_max).to(self.device)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets for oriented bounding box detection."""

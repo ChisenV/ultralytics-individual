@@ -61,6 +61,123 @@ class RotatedBboxLossV2(BboxLoss):
         return total_loss, loss_dfl
 ```
 
+# 以下是针对 `RotatedBboxLoss` 类的逐行代码详解，包含各部分的数学原理和工程实现逻辑：
+
+---
+
+### **1. 类初始化 `__init__`**
+```python
+def __init__(self, reg_max):
+    super().__init__(reg_max)
+```
+- **功能**：继承自 `BboxLoss` 的初始化，设置 DFL (Distribution Focal Loss) 的回归区间最大值 `reg_max`。
+- **关键参数**：
+  - `reg_max`：控制边界框坐标回归的离散化程度（通常设为 16）。
+- **父类作用**：父类 `BboxLoss` 会初始化 DFL 损失模块 (`self.dfl_loss`)。
+
+---
+
+### **2. 前向计算 `forward`**
+#### **输入参数说明**
+| 参数名 | 形状 | 描述 |
+|--------|------|------|
+| `pred_dist` | `(bs, num_anchors, 4*(reg_max+1))` | DFL 输出的分布预测（每个坐标 4 个通道，每通道 `reg_max+1` 个值） |
+| `pred_bboxes` | `(bs, num_anchors, 5)` | 预测的旋转框参数 `[x, y, w, h, angle]` |
+| `anchor_points` | `(num_anchors, 2)` | 锚点坐标 `[x, y]`（用于计算目标距离） |
+| `target_bboxes` | `(bs, num_anchors, 5)` | 真实的旋转框参数 `[x, y, w, h, angle]` |
+| `target_scores` | `(bs, num_anchors, num_classes)` | 分类目标分数 |
+| `target_scores_sum` | `scalar` | 归一化因子（正样本分数总和） |
+| `fg_mask` | `(bs, num_anchors)` | 前景（正样本）掩码 |
+
+---
+
+#### **步骤 1：计算加权 IoU 损失**
+```python
+weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+iou = probiou(pred_bboxes[fg_mask], target_bboxes[fg_mask])
+loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+```
+- **行 1：权重计算**  
+  - `target_scores.sum(-1)`：对每个锚点的多分类分数求和，得到 `(bs, num_anchors)`。  
+  - `[fg_mask]`：筛选正样本，得到 `(num_pos_samples,)`。  
+  - `unsqueeze(-1)`：扩展为 `(num_pos_samples, 1)` 以便后续广播。  
+  - **作用**：高置信度样本的损失权重更大。
+
+- **行 2：概率 IoU 计算**  
+  - `probiou()`：计算预测框与真实框的旋转框 IoU（基于协方差矩阵的概率分布距离）。  
+  - 输入：`pred_bboxes[fg_mask]` 和 `target_bboxes[fg_mask]` 的形状均为 `(num_pos_samples, 5)`。  
+  - 输出：每个样本的 IoU 值 `(num_pos_samples,)`。
+
+- **行 3：加权损失**  
+  - `1.0 - iou`：将 IoU 转换为损失值（范围 [0, 2]）。  
+  - `* weight`：按分类置信度加权。  
+  - `sum() / target_scores_sum`：归一化到批次级别。
+
+---
+
+#### **步骤 2：计算 DFL 损失**
+```python
+if self.dfl_loss:
+    target_ltrb = bbox2dist(anchor_points, xywh2xyxy(target_bboxes[..., :4]), self.dfl_loss.reg_max - 1)
+    loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+    loss_dfl = loss_dfl.sum() / target_scores_sum
+else:
+    loss_dfl = torch.tensor(0.0).to(pred_dist.device)
+```
+- **行 1：目标距离计算**  
+  - `xywh2xyxy(target_bboxes[..., :4])`：将旋转框的中心表示 `[x,y,w,h]` 转为左上右下坐标 `[x1,y1,x2,y2]`。  
+  - `bbox2dist()`：计算锚点到目标框四边的距离，并离散化为 `[0, reg_max-1]` 的分布标签。  
+  - 输出 `target_ltrb` 形状：`(bs, num_anchors, 4)`。
+
+- **行 2：DFL 损失计算**  
+  - `pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max)`：将正样本的预测分布重塑为 `(num_pos_samples*4, reg_max)`。  
+  - `target_ltrb[fg_mask]`：正样本的目标分布 `(num_pos_samples, 4)`。  
+  - `self.dfl_loss()`：计算预测分布与目标分布的交叉熵损失，输出 `(num_pos_samples, 4)`。  
+  - `* weight`：加权（与 IoU 损失共享权重）。
+
+- **行 3：归一化**  
+  - 对加权后的 DFL 损失求和并除以 `target_scores_sum`。
+
+- **else 分支**：如果未启用 DFL，则返回 0。
+
+---
+
+### **3. 关键函数说明**
+#### **`probiou()` 数学原理**
+- **输入**：两个旋转框参数 `[x,y,w,h,angle]`（角度为弧度）。  
+- **步骤**：  
+  1. 计算每个框的协方差矩阵 $(\Sigma)$（反映旋转和尺度信息）。  
+  2. 使用两个高斯分布的 Bhattacharyya 距离 $(D_B)$：  
+     $$
+     D_B = \frac{1}{8}(\mu_2-\mu_1)^T\Sigma^{-1}(\mu_2-\mu_1) + \frac{1}{2}\ln\left(\frac{|\Sigma|}{\sqrt{|\Sigma_1||\Sigma_2|}}\right)
+     $$
+  3. 转换为 IoU：
+     $$
+     \text{IoU} = 1 - \sqrt{1 - e^{-D_B}}
+     $$
+
+#### **`bbox2dist()` 功能**
+- 将绝对距离（如 `target_x1 - anchor_x`）离散化为 `reg_max` 个区间的分布标签。  
+- 例如：若 `reg_max=16`，距离 3.7 会被编码为 `[0,0,0,0.3,0.7,0,...,0]`（Soft Label）。
+
+---
+
+### **4. 输出结果**
+- **返回值**：  
+  - `loss_iou`：旋转框的 IoU 损失（标量）。  
+  - `loss_dfl`：边界框坐标的分布损失（标量）。  
+- **训练应用**：总损失通常为 `loss = loss_iou + loss_dfl + loss_cls`（分类损失需额外计算）。
+
+---
+
+### **5. 设计要点总结**
+1. **旋转框处理**：通过 `probiou` 直接建模旋转几何关系，优于传统 IoU。  
+2. **DFL 优势**：将坐标回归视为分布预测，提升边界定位精度。  
+3. **动态加权**：使用分类分数加权，突出高置信度样本的贡献。  
+4. **数值安全**：所有操作均有 `eps` 防除零，且损失值被约束到合理范围。  
+
+此实现是旋转目标检测（如 DOTA 数据集）中的经典设计，平衡了精度和效率。
+
 # RotatedBboxLoss vs RotatedBboxLossV2 对比分析
 
 ## 主要区别
@@ -330,8 +447,9 @@ def angle_loss(pred_angles, target_angles, method='cos+sin'):
    ```
 
 2. **长宽相等目标的专项测试**：
-   - 构造正方形目标数据集，比较不同损失函数的角度预测误差（MAE°）。
-
+   
+- 构造正方形目标数据集，比较不同损失函数的角度预测误差（MAE°）。
+   
 3. **梯度可视化**：
    ```python
    angle_diff = torch.linspace(-np.pi, np.pi, 100)
@@ -351,6 +469,7 @@ def angle_loss(pred_angles, target_angles, method='cos+sin'):
    ```
 
 2. **数值稳定性**：
+   
    - 对 `angle_diff` 使用 `torch.clamp(..., min=-pi, max=pi)` 防止反向传播异常。
 
 
@@ -379,20 +498,17 @@ class RotatedBboxLossV4(BboxLoss):
         self.angle_loss_method = angle_loss_method
         self.alpha = alpha
 
-    def angle_loss(self, pred_angles, target_angles, method='cos+sin', is_square=False):
+    def angle_loss(self, pred_angles, target_angles):
         angle_diff = pred_angles - target_angles
         angle_diff = (angle_diff + torch.pi) % (2 * torch.pi) - torch.pi  # Constrained to [-π, π]
 
-        if method == 'cos':
+        if self.angle_loss_method == 'cos':
             return 1 - torch.cos(angle_diff)
-        elif method == 'cos+sin':
+        elif self.angle_loss_method == 'cos+sin':
             # Balance the contributions of cos and sin to avoid dimensional differences
-            if is_square:
-                # cos component < sin component
-                return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
-            else:
-                return self.alpha * (1 - torch.cos(angle_diff)) + (1 - self.alpha) * torch.sin(angle_diff).abs()
-        elif method == 'squared':
+            # cos component < sin component
+            return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
+        elif self.angle_loss_method == 'squared':
             # The square form of the Euclidean angular distance
             return 2 * (1 - torch.cos(angle_diff))  # equivalent: (angle_diff.sin()**2 + (1-angle_diff.cos())**2)
 
@@ -426,7 +542,7 @@ class RotatedBboxLossV4(BboxLoss):
         )
 
         # 2. Calculate the loss of the basic Angle (default cos+sin loss)
-        angle_loss = self.angle_loss(pred_angles, target_angles, self.angle_loss_method)
+        angle_loss = self.angle_loss(pred_angles, target_angles)
 
         # 3. Apply dynamic weights and sample weights
         angle_loss = (angle_loss * dynamic_weights * weight.squeeze(-1)).sum() / target_scores_sum
@@ -443,4 +559,5 @@ class RotatedBboxLossV4(BboxLoss):
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
         return total_loss, loss_dfl
+
 ```
