@@ -177,3 +177,6 @@ calibration_*.npy
 
 cmd.txt
 OBB-EC
+BUBBLE-distill
+DETECT-BUBBLE
+DETECT-BUBBLE-debug
