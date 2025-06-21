@@ -367,6 +367,7 @@ class BaseTrainer:
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
         while True:
             self.epoch = epoch
+            stage = epoch / self.epochs
             self.run_callbacks("on_train_epoch_start")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")  # suppress 'Detected lr_scheduler.step() before optimizer.step()'
@@ -403,7 +404,7 @@ class BaseTrainer:
                 # Forward
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    loss, self.loss_items = self.model(batch)
+                    loss, self.loss_items = self.model(batch, stage=stage)
                     self.loss = loss.sum()
                     if RANK != -1:
                         self.loss *= world_size

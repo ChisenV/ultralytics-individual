@@ -5,7 +5,7 @@ from ultralytics import YOLO
 
 
 def train():
-    project_name = "DETECT-BUBBLE"
+    project_name = "DETECT-BUBBLE-debug"
     name = time.strftime("%Y%m%d-%H%M%S")
     model = "./ultralytics/cfg/models/v8/yolov8n.yaml"
     data = "./ultralytics/cfg/datasets/dota8-bubble.yaml"
@@ -68,8 +68,8 @@ def export(path, informat='pt', outformat='onnx', task='detect'):
 
 
 if __name__ == '__main__':
-    # train()
-    predict(
-        model_path=r"G:\github\ultralyticshub\ultralytics-individual\DETECT-BUBBLE\20250608-103946\weights\best.pt",
-        image_path=r"H:\dataset\BUBBLE\BUBBLE-2\images_crop_1024\images"
-    )
+    train()
+    # predict(
+    #     model_path=r"G:\github\ultralyticshub\ultralytics-individual\DETECT-BUBBLE\20250608-103946\weights\best.pt",
+    #     image_path=r"H:\dataset\BUBBLE\BUBBLE-2\images_crop_1024\images"
+    # )

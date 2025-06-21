@@ -322,7 +322,7 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def loss(self, batch, preds=None):
+    def loss(self, batch, preds=None, **kwargs):
         """
         Compute loss.
 
@@ -334,7 +334,7 @@ class BaseModel(torch.nn.Module):
             self.criterion = self.init_criterion()
 
         preds = self.forward(batch["img"]) if preds is None else preds
-        return self.criterion(preds, batch)
+        return self.criterion(preds, batch, **kwargs)
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
