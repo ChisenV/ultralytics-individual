@@ -1,25 +1,27 @@
 import os
 import time
-import wandb
-from ultralytics import YOLO
+from ultralytics import YOLO, SETTINGS
+
+SETTINGS["tensorboard"] = True
 
 
 def train():
     project_name = "DETECT-BUBBLE-debug"
     name = time.strftime("%Y%m%d-%H%M%S")
-    model = "./ultralytics/cfg/models/v8/yolov8n.yaml"
-    data = "./ultralytics/cfg/datasets/dota8-bubble.yaml"
+    model = "./ultralytics/cfg/models/v8/yolov8n-obb-EC.yaml"  # yolov8n-obb-EC.yaml
+    data = "./ultralytics/cfg/datasets/dota8-EC.yaml"
 
-    model = YOLO(model, task="detect")
+    model = YOLO(model, task="obb")
 
     # Train the model
     train_results = model.train(
         project=project_name,
         name=name,
         data=data,  # path to dataset YAML
-        batch=8,  # batch size
-        epochs=800,  # number of epochs
-        imgsz=1024,  # training image size
+        batch=4,  # batch size
+        epochs=1000,  # number of epochs
+        imgsz=960,  # training image size
+        cos_lr=True,  # use cosine LR scheduler
         patience=200,  # early stop patience (epochs without improvement)
         device=0,  # device to run on, i.e. device=0 or device=0,1,2,3 or device=cpu
         hsv_h=0.015,  # (float) image HSV-Hue augmentation (fraction)
@@ -70,6 +72,6 @@ def export(path, informat='pt', outformat='onnx', task='detect'):
 if __name__ == '__main__':
     train()
     # predict(
-    #     model_path=r"G:\github\ultralyticshub\ultralytics-individual\DETECT-BUBBLE\20250608-103946\weights\best.pt",
-    #     image_path=r"H:\dataset\BUBBLE\BUBBLE-2\images_crop_1024\images"
+    #     model_path=r"G:\github\ultralyticshub\ultralytics-individual\DETECT-BUBBLE-debug\20250626-000427\weights\best.pt",
+    #     image_path=r"H:\dataset\obb\all\images\test_bak"
     # )

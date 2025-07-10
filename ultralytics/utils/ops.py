@@ -578,8 +578,97 @@ def xyxyxyxy2xywhr(x):
         # NOTE: Use cv2.minAreaRect to get accurate xywhr,
         # especially some objects are cut off by augmentations in dataloader.
         (cx, cy), (w, h), angle = cv2.minAreaRect(pts)
+        """
+        # using the new OpenCV Rotated BBox definition since 4.5.1
+        # if angle < 0, opencv is older than 4.5.1, angle is in [-90, 0)
+        if angle < 0 and cv2.getVersionString() < "4.5.1":
+            angle += 90
+            w, h = h, w
+
+        # convert angle to (0, 90], opencv >= 4.5.1
+        if angle == -0.0 or angle == 0.0:
+            angle = 90.0
+            w, h = h, w
+        """
         rboxes.append([cx, cy, w, h, angle / 180 * np.pi])
     return torch.tensor(rboxes, device=x.device, dtype=x.dtype) if is_torch else np.asarray(rboxes)
+
+
+def gaussian_label_cpu(label, num_class, u=0, sig=4.0):
+    """
+    转换成 CSL Labels：
+        用高斯窗口函数根据角度 θ 的周期性赋予 gt labels 同样的周期性，使得损失函数在计算边界处时可以做到“差值很大但 loss 很小”；
+        并且使得其 labels 具有环形特征，能够反映各个 θ 之间的角度距离
+    Args:
+        label (float32):[1], theta class
+        num_class (int): [1], theta class num
+        u (float32):[1], μ in gaussian function
+        sig (float32):[1], σ in gaussian function, which is window radius for Circular Smooth Label
+    Returns:
+        csl_label (array): [num_theta_class], gaussian function smooth label
+    """
+    x = np.arange(-num_class / 2, num_class / 2)
+    y_sig = np.exp(-(x - u) ** 2 / (2 * sig ** 2))
+    index = int(num_class / 2 - label)
+    return np.concatenate([y_sig[index:], y_sig[:index]], axis=0)
+
+
+def regular_theta(theta, mode='180', start=-np.pi / 2):
+    """
+    limit theta ∈ [-pi/2, pi/2)
+    """
+    assert mode in ['360', '180', 'pi', '2pi']
+    cycle = 2 * np.pi if mode in ['360', '2pi'] else np.pi
+
+    theta = theta - start
+    theta = theta % cycle
+    return theta + start
+
+
+def poly2rbox(polys: np.ndarray, num_cls_theta=180, radius=6.0, use_radian=False, use_gaussian=False):
+    """
+    Trans poly format to rbox format.
+    Args:
+        polys (numpy.ndarray): (num_gts, 8), 8: [x1 y1 x2 y2 x3 y3 x4 y4]
+        num_cls_theta (int): [1], theta class num
+        radius (float32): [1], window radius for Circular Smooth Label
+        use_radian (bool): True θ ∈ [-pi/2, pi/2) ， False θ ∈ [0, 180)
+        use_gaussian (bool): True use gaussian label
+
+    Returns:
+        use_gaussian True:
+            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ]
+            csl_labels (numpy.ndarray): (num_gts, num_cls_theta)
+        elif
+            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ]
+    """
+    assert polys.shape[-1] == 8
+
+    csl_labels = []  # while use_gaussian
+    rboxes = []
+    for poly in polys:
+        poly = np.float32(poly.reshape(4, 2))
+        (x, y), (w, h), angle = cv2.minAreaRect(poly)  # θ ∈ [0, 90] when opencv >= 4.5.1
+        angle = -angle  # θ ∈ [-90, 0]
+        theta = angle / 180 * np.pi  # switch to the radian
+
+        # trans opencv format to long-edge format θ ∈ [-pi/2, pi/2]
+        if w != max(w, h):
+            w, h = h, w  # long edge first
+            theta += np.pi / 2
+        theta = regular_theta(theta)  # limit θ ∈ [-pi/2, pi/2)
+        angle = (theta * 180 / np.pi) + 90  # θ ∈ [0, 180)
+
+        if use_radian:  # Adopt the radian system θ ∈ [-pi/2, pi/2)
+            rboxes.append([x, y, w, h, theta])
+        else:  # Adopt the angle system θ ∈ [0, 180)
+            rboxes.append([x, y, w, h, angle])
+        if use_gaussian:
+            csl_label = gaussian_label_cpu(label=angle, num_class=num_cls_theta, u=0, sig=radius)
+            csl_labels.append(csl_label)
+    if use_gaussian:
+        return np.array(rboxes), np.array(csl_labels)
+    return np.array(rboxes)
 
 
 def xywhr2xyxyxyxy(x):

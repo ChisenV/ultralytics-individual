@@ -290,16 +290,20 @@ class RotatedBboxLossWithAngle(BboxLoss):
         angle_weight=1.0,
         square_angle_weight=5.0,
         aspect_ratio_thresh=1.2,
-        angle_loss_method="cos+sin",
+        angle_loss_method="double",
+        angle_min_threshold=0.017453,
+        angle_max_threshold=1.553343,
         alpha=0.5
     ):
         """
         Args:
-            reg_max: The maximum value of DFL regression
-            angle_weight: Conventional Angle loss weight
-            square_angle_weight: The angular loss weight of targets with similar length and width
-            aspect_ratio_thresh: Determine the threshold for similar lengths and widths (max(w,h)/min(w,h) < thresh)
-            angle_loss_method: Calculation method of angular loss, option "cos", "cos+sin", "squared"
+            reg_max (int): The maximum value of DFL regression
+            angle_weight (float): Conventional Angle loss weight
+            square_angle_weight (float): The angular loss weight of targets with similar length and width
+            aspect_ratio_thresh (float): Determine the threshold for similar lengths and widths (max(w,h)/min(w,h) < thresh)
+            angle_loss_method (str): Calculation method of angular loss, option "single", "double", "square"
+            angle_min_threshold (float): Minimum angle threshold, default 1 degree
+            angle_max_threshold (float): Maximum angle threshold, default 89 degrees
             alpha: Balance the contributions of cos and sin to avoid dimensional differences
         """
         super().__init__(reg_max)
@@ -307,19 +311,21 @@ class RotatedBboxLossWithAngle(BboxLoss):
         self.square_angle_weight = square_angle_weight
         self.aspect_ratio_thresh = aspect_ratio_thresh
         self.angle_loss_method = angle_loss_method
+        self.angle_min_threshold = max(0., angle_min_threshold)
+        self.angle_max_threshold = min(angle_max_threshold, torch.pi / 2.)
         self.alpha = alpha
 
     def angle_loss(self, pred_angles, target_angles):
         angle_diff = pred_angles - target_angles
         angle_diff = (angle_diff + torch.pi) % (2 * torch.pi) - torch.pi  # Constrained to [-π, π]
 
-        if self.angle_loss_method == 'cos':
+        if self.angle_loss_method == 'single':
             return 1 - torch.cos(angle_diff)
-        elif self.angle_loss_method == 'cos+sin':
+        elif self.angle_loss_method == 'double':
             # Balance the contributions of cos and sin to avoid dimensional differences
             # cos component < sin component
             return (1 - self.alpha) * (1 - torch.cos(angle_diff)) + self.alpha * torch.sin(angle_diff).abs()
-        elif self.angle_loss_method == 'squared':
+        elif self.angle_loss_method == 'square':
             # The square form of the Euclidean angular distance
             return 2 * (1 - torch.cos(angle_diff))  # equivalent: (angle_diff.sin()**2 + (1-angle_diff.cos())**2)
 
@@ -347,19 +353,29 @@ class RotatedBboxLossWithAngle(BboxLoss):
         iou_loss = ((1.0 - iou) * weight).sum() / target_scores_sum
 
         # Calculate angle loss with dynamic weighting
-        pred_angles = pred_bboxes_selected[:, 4]  # [num_selected]
-        target_angles = target_bboxes_selected[:, 4]  # [num_selected]
+        pred_angles = pred_bboxes_selected[:, 4]  # [num_selected] range [-π / 4, 3π / 4]
+        target_angles = target_bboxes_selected[:, 4]  # [num_selected] range (0, π / 2]
+        is_w_gt_h = target_bboxes_selected[:, 2] > target_bboxes_selected[:, 3]  # whether w > h
+
+        ta = target_angles
+        ta = torch.where(ta != torch.pi / 2, ta - torch.pi / 2, ta - torch.pi)  # oc' -> oc
+        ta = torch.where(is_w_gt_h, ta, ta + torch.pi / 2)  # oc -> le
+        ta = torch.where(torch.logical_and(ta >= (-torch.pi / 2), ta < (-torch.pi / 4)), ta + torch.pi, ta)  # le -> le'
+        target_angles = ta
 
         # 1. Calculate the Angle loss weight for targets with similar lengths and widths
         target_wh = target_bboxes_selected[:, 2:4]  # [w,h]
         aspect_ratio = torch.max(target_wh, dim=1)[0] / torch.min(target_wh, dim=1)[0]
-        is_square = aspect_ratio < self.aspect_ratio_thresh
-
         # Dynamic weights: Use angle_weight for regular targets and square_angle_weight for nearly square targets
+        is_square = aspect_ratio < self.aspect_ratio_thresh
+        in_range = torch.logical_or(
+            torch.logical_and(target_angles > 0.017453, pred_angles < 1.553343),
+            torch.logical_and(target_angles < 1.553343, pred_angles > 0.017453)
+        )
         dynamic_weights = torch.where(
-            is_square,
+            torch.logical_and(is_square, in_range),
             torch.tensor(self.square_angle_weight, device=pred_angles.device),
-            torch.tensor(self.angle_weight, device=pred_angles.device)
+            torch.tensor(0., device=pred_angles.device)
         )
 
         # 2. Calculate the loss of the basic Angle (default cos+sin loss)
@@ -432,7 +448,7 @@ class v8DetectionLoss:
             out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
         else:
             i = targets[:, 0]  # image index
-            _, counts = i.unique(return_counts=True)
+            _, counts = i.unique(return_counts=True)  # image index, number of targets per image
             counts = counts.to(dtype=torch.int32)
             out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
             for j in range(batch_size):
@@ -440,7 +456,7 @@ class v8DetectionLoss:
                 if n := matches.sum():
                     out[j, :n] = targets[matches, 1:]
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
-        return out
+        return out  # [batch size, max number of targets in current batch, 5(cla,x1,y1,x2,y2)]
 
     def bbox_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""

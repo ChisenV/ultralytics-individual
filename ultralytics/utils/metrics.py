@@ -187,11 +187,13 @@ def bbox_iou_v2(
     GIoU: bool = False,
     DIoU: bool = False,
     CIoU: bool = False,
+    ECIoU: bool = False,
     SIoU: bool = False,
     EIoU: bool = False,
     WIoU: bool = False,
     PIoU: bool = False,
     PIoU2: bool = False,
+    ShapeIoU: bool = False,
     Focal: bool = False,
     alpha=1,
     gamma=0.5,
@@ -209,11 +211,13 @@ def bbox_iou_v2(
         GIoU (bool, optional): If True, calculate Generalized IoU.
         DIoU (bool, optional): If True, calculate Distance IoU.
         CIoU (bool, optional): If True, calculate Complete IoU.
+        ECIoU (bool, optional): If True, calculate Enhanced Complete IoU.
         SIoU (bool, optional): If True, calculate Scylla IoU.
         EIoU (bool, optional): If True, calculate Focal and Efficient IoU.
         WIoU (bool, optional): If True, calculate Wise IoU.
         PIoU (bool, optional): If True, calculate Powerful IoU.
         PIoU2 (bool, optional): If True, calculate Powerful IoU v2.
+        ShapeIoU (bool, optional): If True, calculate Shape IoU.
         Focal (bool, optional): If True, calculate Focal IoU.
         alpha:
         gamma:
@@ -249,17 +253,21 @@ def bbox_iou_v2(
     # IoU
     # iou = inter / union  # ori iou
     iou = torch.pow(inter / (union + eps), alpha)  # alpha iou
-    if CIoU or DIoU or GIoU or EIoU or SIoU or WIoU:
+    if CIoU or DIoU or GIoU or EIoU or SIoU or WIoU or ShapeIoU:
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
-        if CIoU or DIoU or EIoU or SIoU or WIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+        if CIoU or DIoU or EIoU or SIoU or WIoU or ShapeIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
             c2 = (cw ** 2 + ch ** 2) ** alpha + eps  # convex diagonal squared
-            rho2 = (((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (
-                        b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4) ** alpha  # center dist ** 2
+            cd_x = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2) / 4  # center distance x
+            cd_y = ((b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center distance y
+            rho2 = (cd_x + cd_y) ** alpha  # center dist ** 2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
                 v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
                 with torch.no_grad():
-                    alpha_ciou = v / (v - iou + (1 + eps))
+                    if ECIoU:  # Enhanced CIoU http://arxiv.org/abs/2005.03572
+                        alpha_ciou = torch.where(iou < 0.5, torch.zeros_like(v), v / (v - iou + (1 + eps)))
+                    else:
+                        alpha_ciou = v / (v - iou + (1 + eps))
                 if Focal:
                     return (iou - (rho2 / c2 + torch.pow(v * alpha_ciou + eps, alpha)),
                             torch.pow(inter / (union + eps), gamma))  # Focal_CIoU
@@ -298,6 +306,18 @@ def bbox_iou_v2(
                         inter / (union + eps), gamma)  # Focal_SIou
                 else:
                     return iou - torch.pow(0.5 * (distance_cost + shape_cost) + eps, alpha)  # SIou
+            elif ShapeIoU:
+                # http://arxiv.org/abs/2312.17663
+                # Shape-Distance
+                ww = 2 * torch.pow(w2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+                hh = 2 * torch.pow(h2, scale) / (torch.pow(w2, scale) + torch.pow(h2, scale))
+                cd = hh * cd_x + ww * cd_y  # center distance
+                distance = cd / c2
+                # Shape-Shape
+                omiga_w = hh * torch.abs(w1 - w2) / torch.max(w1, w2)
+                omiga_h = ww * torch.abs(h1 - h2) / torch.max(h1, h2)
+                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+                return iou - distance - 0.5 * shape_cost
             elif WIoU:
                 # Wise-IoU https://arxiv.org/abs/2301.10051
                 if Focal:
@@ -311,26 +331,26 @@ def bbox_iou_v2(
                 return iou - rho2 / c2, torch.pow(inter / (union + eps), gamma)  # Focal_DIoU
             else:
                 return iou - rho2 / c2  # DIoU
-        elif PIoU or PIoU2:
-            # https://www.sciencedirect.com/science/article/abs/pii/S0893608023006640
-            dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
-            dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
-            dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
-            dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
-            P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
-            L_PIoU_v1 = 1 - iou - torch.exp(-P ** 2) + 1  # L_PIoU = L_IoU + 1 - e^(-P^2), 0 <= L_PIoU <= 2
-            if PIoU:
-                return 1 - L_PIoU_v1  # PIoU
-            if PIoU2:
-                q = torch.exp(-P)
-                x = q * Lambda
-                return 1 - 3 * x * torch.exp(-x ** 2) * L_PIoU_v1
         c_area = cw * ch + eps  # convex area
         if Focal:
             return (iou - torch.pow((c_area - union) / c_area + eps, alpha),
                     torch.pow(inter / (union + eps), gamma))  # Focal_GIoU https://arxiv.org/pdf/1902.09630.pdf
         else:
             return iou - torch.pow((c_area - union) / c_area + eps, alpha)  # GIoU https://arxiv.org/pdf/1902.09630.pdf
+    elif PIoU or PIoU2:
+        # https://www.sciencedirect.com/science/article/abs/pii/S0893608023006640
+        dw1 = torch.abs(b1_x2.minimum(b1_x1) - b2_x2.minimum(b2_x1))
+        dw2 = torch.abs(b1_x2.maximum(b1_x1) - b2_x2.maximum(b2_x1))
+        dh1 = torch.abs(b1_y2.minimum(b1_y1) - b2_y2.minimum(b2_y1))
+        dh2 = torch.abs(b1_y2.maximum(b1_y1) - b2_y2.maximum(b2_y1))
+        P = ((dw1 + dw2) / torch.abs(w2) + (dh1 + dh2) / torch.abs(h2)) / 4
+        L_PIoU_v1 = 1 - iou - torch.exp(-P ** 2) + 1  # L_PIoU = L_IoU + 1 - e^(-P^2), 0 <= L_PIoU <= 2
+        if PIoU:
+            return 1 - L_PIoU_v1  # PIoU
+        if PIoU2:
+            q = torch.exp(-P)
+            x = q * Lambda
+            return 1 - 3 * x * torch.exp(-x ** 2) * L_PIoU_v1
     if Focal:
         return iou, torch.pow(inter / (union + eps), gamma)  # Focal_IoU
     else:
@@ -391,13 +411,22 @@ def _get_covariance_matrix(boxes: torch.Tensor) -> Tuple[torch.Tensor, torch.Ten
         (torch.Tensor): Covariance matrices corresponding to original rotated bounding boxes.
     """
     # Gaussian bounding boxes, ignore the center points (the first two columns) because they are not needed here.
+    # boxes[:, 2:4] The width (w) and height (h) of the rotating frame, boxes[:, 4:] Rotation Angle (r)
+    # pow(wh) / 12 The variance of the discretized bounding box under Gaussian distribution, [N, 3]
     gbbs = torch.cat((boxes[:, 2:4].pow(2) / 12, boxes[:, 4:]), dim=-1)
+    # Wide direction variance, high direction variance, rotation Angle
     a, b, c = gbbs.split(1, dim=-1)
+    # Calculate the sine, cosine and square of the rotation Angle
     cos = c.cos()
     sin = c.sin()
     cos2 = cos.pow(2)
     sin2 = sin.pow(2)
-    return a * cos2 + b * sin2, a * sin2 + b * cos2, (a - b) * cos * sin
+    # The calculation of three parameters of covariance
+    return (
+        a * cos2 + b * sin2,  # The variances of width and height in the main axis direction after rotation
+        a * sin2 + b * cos2,  # The variances of the width and height in the secondary axis direction after rotation
+        (a - b) * cos * sin   # The correlation in the primary and secondary directions
+    )
 
 
 def probiou(obb1: torch.Tensor, obb2: torch.Tensor, CIoU: bool = False, eps: float = 1e-7) -> torch.Tensor:
@@ -424,16 +453,21 @@ def probiou(obb1: torch.Tensor, obb2: torch.Tensor, CIoU: bool = False, eps: flo
     a1, b1, c1 = _get_covariance_matrix(obb1)
     a2, b2, c2 = _get_covariance_matrix(obb2)
 
+    # t1: Punishment for the difference in the position of the center point
     t1 = (
         ((a1 + a2) * (y1 - y2).pow(2) + (b1 + b2) * (x1 - x2).pow(2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)
     ) * 0.25
+    # t2: Punishment for central point correlation
     t2 = (((c1 + c2) * (x2 - x1) * (y1 - y2)) / ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2) + eps)) * 0.5
+    # t3: Similarity in shape and size
     t3 = (
         ((a1 + a2) * (b1 + b2) - (c1 + c2).pow(2))
         / (4 * ((a1 * b1 - c1.pow(2)).clamp_(0) * (a2 * b2 - c2.pow(2)).clamp_(0)).sqrt() + eps)
         + eps
     ).log() * 0.5
+    # bd: The measure representing the distance between the rotating boxes is the sum of t1, t2, and t3
     bd = (t1 + t2 + t3).clamp(eps, 100.0)
+    # Transform the distance into a smooth similarity measure and finally obtain hd
     hd = (1.0 - (-bd).exp() + eps).sqrt()
     iou = 1 - hd
     if CIoU:  # only include the wh aspect ratio part
