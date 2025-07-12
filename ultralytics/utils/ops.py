@@ -559,7 +559,7 @@ def ltwh2xywh(x):
     return y
 
 
-def xyxyxyxy2xywhr(x):
+def xyxyxyxy2xywhr_p(x):
     """
     Convert batched Oriented Bounding Boxes (OBB) from [xy1, xy2, xy3, xy4] to [xywh, rotation] format.
 
@@ -594,6 +594,20 @@ def xyxyxyxy2xywhr(x):
     return torch.tensor(rboxes, device=x.device, dtype=x.dtype) if is_torch else np.asarray(rboxes)
 
 
+def xyxyxyxy2xywhr(x):
+    """
+    Convert batched Oriented Bounding Boxes (OBB) from [xy1, xy2, xy3, xy4] to [xywh, rotation]. Rotation values are
+    returned in radians from -pi/2 to pi/2.
+
+    Args:
+        x (numpy.ndarray | torch.Tensor): Input box corners [xy1, xy2, xy3, xy4] of shape (n, 8).
+
+    Returns:
+        (numpy.ndarray | torch.Tensor): Converted data in [cx, cy, w, h, rotation] format of shape (n, 5).
+    """
+    return poly2rbox(x, use_radian=True)
+
+
 def gaussian_label_cpu(label, num_class, u=0, sig=4.0):
     """
     转换成 CSL Labels：
@@ -625,50 +639,60 @@ def regular_theta(theta, mode='180', start=-np.pi / 2):
     return theta + start
 
 
-def poly2rbox(polys: np.ndarray, num_cls_theta=180, radius=6.0, use_radian=False, use_gaussian=False):
+def poly2rbox(x, use_radian=False, use_gaussian=False, num_cls_theta=180, radius=6.0):
     """
     Trans poly format to rbox format.
     Args:
-        polys (numpy.ndarray): (num_gts, 8), 8: [x1 y1 x2 y2 x3 y3 x4 y4]
-        num_cls_theta (int): [1], theta class num
-        radius (float32): [1], window radius for Circular Smooth Label
+        x (numpy.ndarray | torch.Tensor): (num_gts, n, 2): [[[x1, y1], [x2, y2], [x3, y3], [x4, y4], ...]]
         use_radian (bool): True θ ∈ [-pi/2, pi/2) ， False θ ∈ [0, 180)
         use_gaussian (bool): True use gaussian label
+        num_cls_theta (int): [1], theta class num
+        radius (float32): [1], window radius for Circular Smooth Label, never use.
 
     Returns:
         use_gaussian True:
-            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ]
+            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ], θ ∈ [-pi/2, pi/2)
             csl_labels (numpy.ndarray): (num_gts, num_cls_theta)
         elif
             rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ]
     """
-    assert polys.shape[-1] == 8
-
+    is_torch = isinstance(x, torch.Tensor)
+    polys = x.cpu().numpy() if is_torch else x
     csl_labels = []  # while use_gaussian
     rboxes = []
     for poly in polys:
-        poly = np.float32(poly.reshape(4, 2))
-        (x, y), (w, h), angle = cv2.minAreaRect(poly)  # θ ∈ [0, 90] when opencv >= 4.5.1
-        angle = -angle  # θ ∈ [-90, 0]
+        # poly = np.float32(poly.reshape(-1, 2))
+        # NOTE: Use cv2.minAreaRect to get accurate xywhr,
+        # especially some objects are cut off by augmentations in dataloader.
+        (cx, cy), (w, h), angle = cv2.minAreaRect(poly)  # θ ∈ [0, 90] when opencv >= 4.5.1
+        w, h = round(w, 4), round(h, 4)
+        # angle = -angle  # θ ∈ [-90, 0]
+        if angle != 90:
+            angle -= 90
+            w, h = h, w  # θ ∈ [-90, 0]
+        else:
+            angle -= 180
         theta = angle / 180 * np.pi  # switch to the radian
 
         # trans opencv format to long-edge format θ ∈ [-pi/2, pi/2]
-        if w != max(w, h):
+        # if w != max(w, h):
+        if w < h:
             w, h = h, w  # long edge first
             theta += np.pi / 2
         theta = regular_theta(theta)  # limit θ ∈ [-pi/2, pi/2)
+        theta = round(theta, 6)
         angle = (theta * 180 / np.pi) + 90  # θ ∈ [0, 180)
 
         if use_radian:  # Adopt the radian system θ ∈ [-pi/2, pi/2)
-            rboxes.append([x, y, w, h, theta])
+            rboxes.append([cx, cy, w, h, theta])
         else:  # Adopt the angle system θ ∈ [0, 180)
-            rboxes.append([x, y, w, h, angle])
+            rboxes.append([cx, cy, w, h, angle])
         if use_gaussian:
             csl_label = gaussian_label_cpu(label=angle, num_class=num_cls_theta, u=0, sig=radius)
             csl_labels.append(csl_label)
     if use_gaussian:
         return np.array(rboxes), np.array(csl_labels)
-    return np.array(rboxes)
+    return torch.tensor(rboxes, device=x.device, dtype=x.dtype) if is_torch else np.array(rboxes)
 
 
 def xywhr2xyxyxyxy(x):

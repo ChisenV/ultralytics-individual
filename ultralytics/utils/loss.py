@@ -892,12 +892,12 @@ class v8ClassificationLoss:
 class v8OBBLoss(v8DetectionLoss):
     """Calculates losses for object detection, classification, and box distribution in rotated YOLO models."""
 
-    def __init__(self, model, emphasize_angle=True):
+    def __init__(self, model):
         """Initialize v8OBBLoss with model, assigner, and rotated bbox loss; model must be de-paralleled."""
         super().__init__(model)
         self.assigner = RotatedTaskAlignedAssigner(topk=10, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = RotatedBboxLossWithAngle(self.reg_max).to(self.device) if emphasize_angle \
-            else RotatedBboxLoss(self.reg_max).to(self.device)
+        self.bbox_loss = RotatedBboxLoss(self.reg_max).to(self.device)
+        self.coder = getattr(model.model[-1], "coder", None)
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets for oriented bounding box detection."""
@@ -917,9 +917,15 @@ class v8OBBLoss(v8DetectionLoss):
         return out
 
     def __call__(self, preds: Any, batch: Dict[str, torch.Tensor], **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Calculate and return the loss for oriented bounding box detection."""
+        """Calculate and return the loss for oriented bounding box detection.
+        Args:
+            preds (tuple): A tuple containing the model predictions.
+                1. feats (list): A list of feature maps from the model.
+                2. pred_angle (torch.Tensor): The predicted angles after decoding for the rotated bounding boxes.
+                3. encode_angle (torch.Tensor): The sigmoid-predicted values obtained from the output of the Conv layer
+        """
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
-        feats, pred_angle = preds if isinstance(preds[0], list) else preds[1]
+        feats, pred_angle = preds[:2] if isinstance(preds[0], list) else preds[1]
         batch_size = pred_angle.shape[0]  # batch size, number of masks, mask height, mask width
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
@@ -981,6 +987,19 @@ class v8OBBLoss(v8DetectionLoss):
             )
         else:
             loss[0] += (pred_angle * 0).sum()
+
+        if len(preds) == 3 and self.coder is not None:
+            fg_mask_flat = fg_mask.view(-1)  # (n,)
+            weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+            pa_enc = preds[2]
+            pa_enc = pa_enc.permute(0, 2, 1).contiguous()  # (bs, h*w, 6)
+            pa_enc = pa_enc.view(-1, 6)[fg_mask_flat]  # (n, 6)
+            target_bboxes_selected = target_bboxes.view(-1, 5)[fg_mask_flat]
+            ta = target_bboxes_selected[:, 4]  # [num_selected] [-pi/2, pi/2]
+            ta_enc = self.coder.encode(ta.unsqueeze(-1))  # (n, 6)
+            # angle_loss = self.angle_loss(pa_enc, ta_enc)
+            angle_loss = (torch.abs(pa_enc - ta_enc) * weight).sum() / target_scores_sum
+            loss[0] = loss[0] + 0.5 * angle_loss  # 0.02 is an experience val, can be tuned
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

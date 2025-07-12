@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import constant_, xavier_uniform_
 
-from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors
+from ultralytics.utils.tal import TORCH_1_10, dist2bbox, dist2rbox, make_anchors, PSCCoder
 from ultralytics.utils.torch_utils import fuse_conv_and_bn, smart_inference_mode
 
 from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, Proto, Residual, SwiGLUFFN
@@ -304,7 +304,7 @@ class OBB(Detect):
         >>> outputs = obb(x)
     """
 
-    def __init__(self, nc: int = 80, ne: int = 1, ch: Tuple = ()):
+    def __init__(self, nc: int = 80, ne: int = 1, ch: Tuple = (), psc: bool = True):
         """
         Initialize OBB with number of classes `nc` and layer channels `ch`.
 
@@ -315,12 +315,19 @@ class OBB(Detect):
         """
         super().__init__(nc, ch)
         self.ne = ne  # number of extra parameters
-
+        self.psc = psc
+        if psc:
+            self.coder = PSCCoder(ns=3, df=True, tm=0.0)
+            self.ne *= self.coder.encode_size  # angle encode size
         c4 = max(ch[0] // 4, self.ne)
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
+        self.cv4 = nn.ModuleList(nn.Sequential(
+            Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)
+        ) for x in ch)
 
     def forward(self, x: List[torch.Tensor]) -> Union[torch.Tensor, Tuple]:
         """Concatenate and return predicted bounding boxes and class probabilities."""
+        if self.psc:
+            return self.forward_psc(x)
         bs = x[0].shape[0]  # batch size
         angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)  # OBB theta logits
         # NOTE: set `angle` as an attribute so that `decode_bboxes` could use it.
@@ -332,6 +339,23 @@ class OBB(Detect):
         if self.training:
             return x, angle
         return torch.cat([x, angle], 1) if self.export else (torch.cat([x[0], angle], 1), (x[1], angle))
+
+    def forward_psc(self, x):
+        """Concatenates and returns predicted bounding boxes and class probabilities."""
+        bs = x[0].shape[0]  # batch size
+        angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)  # OBB theta logits
+        # NOTE: set `angle` as an attribute so that `decode_bboxes` could use it.
+        angle_enc = 2 * angle.sigmoid() - 1  # [-1, 1]
+        angle_rad = self.coder.decode(angle_enc, keepdim=True, ne=self.ne // self.coder.encode_size)  # [-π/2, π/2)
+        if not self.training:
+            self.angle = angle_rad
+        x = Detect.forward(self, x)
+        if self.training:
+            return x, angle_rad, angle_enc  # angle_rad解码出角度在decode_bboxes使用，angle用于loss计算
+        if self.export:
+            return torch.cat([x, angle_rad], 1)
+        else:
+            return (torch.cat([x[0], angle_rad], 1), (x[1], angle_rad))
 
     def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
         """Decode rotated bounding boxes."""

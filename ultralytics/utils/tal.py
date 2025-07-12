@@ -410,12 +410,6 @@ def dist2rbox(pred_dist, pred_angle, anchor_points, dim=-1):
     Returns:
         (torch.Tensor): Predicted rotated bounding boxes with shape (bs, h*w, 4).
     """
-    # if use PSCCoder:
-    # pred_angle = torch.where(
-    #     torch.logical_and(pred_angle >= -torch.pi/2, pred_angle < -torch.pi/4),
-    #     pred_angle + torch.pi,
-    #     pred_angle
-    # )  # [-π/4, 3π/4)
     lt, rb = pred_dist.split(2, dim=dim)
     cos, sin = torch.cos(pred_angle), torch.sin(pred_angle)
     # (bs, h*w, 1) get the half-width and half-height, which are then used for rotation
