@@ -487,7 +487,7 @@ All Ultralytics `predict()` calls will return a list of `Results` objects:
 
 | Attribute    | Type                  | Description                                                                              |
 | ------------ | --------------------- | ---------------------------------------------------------------------------------------- |
-| `orig_img`   | `numpy.ndarray`       | The original image as a numpy array.                                                     |
+| `orig_img`   | `np.ndarray`          | The original image as a numpy array.                                                     |
 | `orig_shape` | `tuple`               | The original image shape in (height, width) format.                                      |
 | `boxes`      | `Boxes, optional`     | A Boxes object containing the detection bounding boxes.                                  |
 | `masks`      | `Masks, optional`     | A Masks object containing the detection masks.                                           |
@@ -516,12 +516,9 @@ All Ultralytics `predict()` calls will return a list of `Results` objects:
 | `save_txt()`  | `str`                  | Saves detection results to a text file and returns the path to the saved file.            |
 | `save_crop()` | `None`                 | Saves cropped detection images to specified directory.                                    |
 | `summary()`   | `List[Dict[str, Any]]` | Converts inference results to a summarized dictionary with optional normalization.        |
-| `to_df()`     | `DataFrame`            | Converts detection results to a Pandas DataFrame.                                         |
+| `to_df()`     | `DataFrame`            | Converts detection results to a Polars DataFrame.                                         |
 | `to_csv()`    | `str`                  | Converts detection results to CSV format.                                                 |
-| `to_xml()`    | `str`                  | Converts detection results to XML format.                                                 |
-| `to_html()`   | `str`                  | Converts detection results to HTML format.                                                |
 | `to_json()`   | `str`                  | Converts detection results to JSON format.                                                |
-| `to_sql()`    | `None`                 | Converts detection results to SQL-compatible format and saves to database.                |
 
 For more details see the [`Results` class documentation](../reference/engine/results.md).
 
@@ -744,7 +741,7 @@ The `plot()` method supports various arguments to customize the output:
 | `font_size`  | `float`                | Text font size. Scales with image size if `None`.                          | `None`            |
 | `font`       | `str`                  | Font name for text annotations.                                            | `'Arial.ttf'`     |
 | `pil`        | `bool`                 | Return image as a PIL Image object.                                        | `False`           |
-| `img`        | `numpy.ndarray`        | Alternative image for plotting. Uses the original image if `None`.         | `None`            |
+| `img`        | `np.ndarray`           | Alternative image for plotting. Uses the original image if `None`.         | `None`            |
 | `im_gpu`     | `torch.Tensor`         | GPU-accelerated image for faster mask plotting. Shape: (1, 3, 640, 640).   | `None`            |
 | `kpt_radius` | `int`                  | Radius for drawn keypoints.                                                | `5`               |
 | `kpt_line`   | `bool`                 | Connect keypoints with lines.                                              | `True`            |
