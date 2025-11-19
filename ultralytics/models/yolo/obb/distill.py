@@ -1,33 +1,27 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 
-import sys, os, torch, math, time, warnings
+import torch, math, time, warnings
 import matplotlib
 matplotlib.use('AGG')
-import matplotlib.pylab as plt
 import torch.nn as nn
 from torch import optim
-from thop import clever_format
-from functools import partial
 from torch import distributed as dist
 from torch.cuda import amp
 from torch.nn.parallel import DistributedDataParallel as DDP
-from datetime import datetime
 
-from copy import copy, deepcopy
-from pathlib import Path
+from copy import copy
 
 import numpy as np
 
 from ultralytics.cfg import get_cfg, get_save_dir
 from ultralytics.data import build_dataloader, build_yolo_dataset
 from ultralytics.data.utils import check_cls_dataset, check_det_dataset
-from ultralytics.engine.trainer import BaseTrainer
 from ultralytics.models import yolo
-from ultralytics.nn.tasks import OBBModel, attempt_load_one_weight, attempt_load_weights
+from ultralytics.nn.tasks import OBBModel, load_checkpoint
 from ultralytics.utils import (
-    DEFAULT_CFG, LOGGER, RANK, LOCAL_RANK, TQDM, clean_url, colorstr, emojis, YAML, callbacks, __version__)
+    DEFAULT_CFG, LOGGER, RANK, LOCAL_RANK, TQDM, clean_url, colorstr, emojis, YAML, callbacks)
 from ultralytics.utils.plotting import plot_images, plot_labels, plot_results
-from ultralytics.utils.torch_utils import de_parallel, torch_distributed_zero_first
+from ultralytics.utils.torch_utils import unwrap_model, torch_distributed_zero_first
 from ultralytics.utils.checks import check_imgsz, print_args, check_amp
 from ultralytics.utils.autobatch import check_train_batch_size
 from ultralytics.utils.torch_utils import ModelEMA, EarlyStopping, one_cycle, init_seeds, select_device
@@ -146,7 +140,7 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
             mode (str): `train` mode or `val` mode, users are able to customize different augmentations for each mode.
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
-        gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
+        gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == 'val', stride=gs)
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode='train'):
@@ -167,7 +161,7 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
         return batch
 
     def set_model_attributes(self):
-        """Nl = de_parallel(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
+        """Nl = unwrap_model(self.model).model[-1].nl  # number of detection layers (to scale hyps)."""
         # self.args.box *= 3 / nl  # scale to layers
         # self.args.cls *= self.data["nc"] / 80 * 3 / nl  # scale to classes and layers
         # self.args.cls *= (self.args.imgsz / 640) ** 2 * 3 / nl  # scale to image size and layers
@@ -314,7 +308,7 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
         model, weights = self.model, None
         ckpt = None
         if str(model).endswith('.pt'):
-            weights, ckpt = attempt_load_one_weight(model)
+            weights, ckpt = load_checkpoint(model)
             cfg = weights.yaml
         else:
             cfg = model
@@ -326,7 +320,7 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
         # model, weights = self.args.teacher_weights, None
         # ckpt = None
         # if str(model).endswith('.pt'):
-        #     weights, ckpt = attempt_load_one_weight(model)
+        #     weights, ckpt = load_checkpoint(model)
         #     cfg = weights.yaml
         # else:
         #     cfg = model
@@ -415,17 +409,17 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
                 if '-' in t_layer:
                     t_layer_first, t_layer_second = t_layer.split('-')
                     t_feature_idx.append(int(t_layer_second) / 10)
-                    hooks.append(de_parallel(self.teacher_model).model[int(t_layer_first)].register_forward_hook(get_activation(t_feature, backbone_idx=int(t_layer_second))))
+                    hooks.append(unwrap_model(self.teacher_model).model[int(t_layer_first)].register_forward_hook(get_activation(t_feature, backbone_idx=int(t_layer_second))))
                 else:
-                    hooks.append(de_parallel(self.teacher_model).model[int(t_layer)].register_forward_hook(get_activation(t_feature)))
+                    hooks.append(unwrap_model(self.teacher_model).model[int(t_layer)].register_forward_hook(get_activation(t_feature)))
                     t_feature_idx.append(int(t_layer))
 
                 if '-' in s_layer:
                     s_layer_first, s_layer_second = s_layer.split('-')
                     s_feature_idx.append(int(s_layer_second) / 10)
-                    hooks.append(de_parallel(self.model).model[int(s_layer_first)].register_forward_hook(get_activation(s_feature, backbone_idx=int(s_layer_second))))
+                    hooks.append(unwrap_model(self.model).model[int(s_layer_first)].register_forward_hook(get_activation(s_feature, backbone_idx=int(s_layer_second))))
                 else:
-                    hooks.append(de_parallel(self.model).model[int(s_layer)].register_forward_hook(get_activation(s_feature)))
+                    hooks.append(unwrap_model(self.model).model[int(s_layer)].register_forward_hook(get_activation(s_feature)))
                     s_feature_idx.append(int(s_layer))
             inputs = torch.randn((2, 3, self.args.imgsz, self.args.imgsz)).to(self.device)
             with torch.no_grad():
@@ -495,17 +489,17 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
                     if '-' in t_layer:
                         t_layer_first, t_layer_second = t_layer.split('-')
                         t_feature_idx.append(int(t_layer_second) / 10)
-                        hooks.append(de_parallel(self.teacher_model).model[int(t_layer_first)].register_forward_hook(get_activation(t_feature, backbone_idx=int(t_layer_second))))
+                        hooks.append(unwrap_model(self.teacher_model).model[int(t_layer_first)].register_forward_hook(get_activation(t_feature, backbone_idx=int(t_layer_second))))
                     else:
-                        hooks.append(de_parallel(self.teacher_model).model[int(t_layer)].register_forward_hook(get_activation(t_feature)))
+                        hooks.append(unwrap_model(self.teacher_model).model[int(t_layer)].register_forward_hook(get_activation(t_feature)))
                         t_feature_idx.append(int(t_layer))
                     
                     if '-' in s_layer:
                         s_layer_first, s_layer_second = s_layer.split('-')
                         s_feature_idx.append(int(s_layer_second) / 10)
-                        hooks.append(de_parallel(self.model).model[int(s_layer_first)].register_forward_hook(get_activation(s_feature, backbone_idx=int(s_layer_second))))
+                        hooks.append(unwrap_model(self.model).model[int(s_layer_first)].register_forward_hook(get_activation(s_feature, backbone_idx=int(s_layer_second))))
                     else:
-                        hooks.append(de_parallel(self.model).model[int(s_layer)].register_forward_hook(get_activation(s_feature)))
+                        hooks.append(unwrap_model(self.model).model[int(s_layer)].register_forward_hook(get_activation(s_feature)))
                         s_feature_idx.append(int(s_layer))
                 
                 s_feature_sort_idx, t_feature_sort_idx = sorted(s_feature_idx), sorted(t_feature_idx)
@@ -545,9 +539,9 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
                         if 'momentum' in x:
                             x['momentum'] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
                 
-                if hasattr(de_parallel(self.model), 'net_update_temperature'):
+                if hasattr(unwrap_model(self.model), 'net_update_temperature'):
                     temp = get_temperature(i + 1, epoch, len(self.train_loader), temp_epoch=20, temp_init_value=1.0)
-                    de_parallel(self.model).net_update_temperature(temp)
+                    unwrap_model(self.model).net_update_temperature(temp)
                 
                 if self.args.kd_loss_decay == 'constant':
                     distill_decay = 1.0
@@ -565,12 +559,12 @@ class OBBDistiller(yolo.detect.DetectionTrainer):
                 # Forward
                 with torch.cuda.amp.autocast(self.amp):
                     batch = self.preprocess_batch(batch)
-                    pred = de_parallel(self.model).predict(batch['img'])
+                    pred = unwrap_model(self.model).predict(batch['img'])
                     
                     with torch.no_grad():
-                        t_pred = de_parallel(self.teacher_model).predict(batch['img'])
+                        t_pred = unwrap_model(self.teacher_model).predict(batch['img'])
                     
-                    main_loss, self.loss_items = de_parallel(self.model).criterion(pred, batch)
+                    main_loss, self.loss_items = unwrap_model(self.model).criterion(pred, batch)
                     
                     log_distill_loss, fea_distill_loss = torch.zeros(1, device=self.device), torch.zeros(1, device=self.device)
                     if self.kd_logical_loss is not None:
