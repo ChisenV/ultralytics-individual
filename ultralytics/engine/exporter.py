@@ -1599,6 +1599,7 @@ class ModelExporter:
             'yolov7': "https://github.com/WongKinYiu/yolov7#export",
             'yolov9': "https://github.com/WongKinYiu/yolov9/issues/130#issue-2162045461",
         }
+        self.__configs = {}
         LOGGER.info("Starting export with Pytorch.")
 
     def load(self, weights: str, version: str, repo_dir: Optional[str] = None,
@@ -1651,6 +1652,10 @@ class ModelExporter:
             if class_name in self.__head_config:
                 self.__head_name = class_name
                 detect_head = self.__head_config[class_name]["class_map"].get(self.__version)
+                if getattr(detect_head, "few_outputs", False):
+                    self.__configs["few_outputs"] = True
+                    if class_name == "Segment":
+                        self.__head_config[class_name]["output_names"] = ["output0", "output1"]
                 if detect_head:
                     supported = True
                     if class_name != "Classify":
@@ -1714,21 +1719,23 @@ class ModelExporter:
                 preds[-1].shape[-1],
             ]
         elif self.__head_name == "Segment" or self.__head_name == 'YOLOESegment':
-            output_shapes['det_masks'] = [
-                "batch" if self.__dynamic else self.__batch,
-                self.__max_boxes,
-                "height" if self.__dynamic else preds[-1].shape[-2],  # imgsz[0],
-                "width" if self.__dynamic else preds[-1].shape[-1],   # imgsz[1],
-            ]
-            # output_shapes = {
-            #     'detects': ["batch" if self.__dynamic else self.__batch, self.__max_boxes, 6],
-            #     'det_masks': [
-            #         "batch" if self.__dynamic else self.__batch,
-            #         self.__max_boxes,
-            #         imgsz[0] // 4,
-            #         imgsz[1] // 4
-            #     ],
-            # }
+            if self.__configs.get("few_outputs", False):
+                output_shapes = {
+                    'output0': ["batch" if self.__dynamic else self.__batch, self.__max_boxes, 6],
+                    'output1': [
+                        "batch" if self.__dynamic else self.__batch,
+                        self.__max_boxes,
+                        imgsz[0] // 4,
+                        imgsz[1] // 4
+                    ],
+                }
+            else:
+                output_shapes['det_masks'] = [
+                    "batch" if self.__dynamic else self.__batch,
+                    self.__max_boxes,
+                    "height" if self.__dynamic else preds[-1].shape[-2],  # imgsz[0],
+                    "width" if self.__dynamic else preds[-1].shape[-1],   # imgsz[1],
+                ]
         elif self.__head_name == "Classify":
             output_shapes = {'topk': ["batch" if self.__dynamic else self.__batch, preds[-1].shape[1], 2]}
 

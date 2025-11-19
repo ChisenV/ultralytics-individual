@@ -1,6 +1,7 @@
 import os
 import time
 from ultralytics import YOLO, SETTINGS
+from ultralytics.engine.exporter import torch_export
 
 SETTINGS["tensorboard"] = True
 
@@ -19,7 +20,7 @@ def train():
         name=name,
         data=data,  # path to dataset YAML
         batch=4,  # batch size
-        epochs=1000,  # number of epochs
+        epochs=5,  # number of epochs
         imgsz=960,  # training image size
         cos_lr=True,  # use cosine LR scheduler
         patience=200,  # early stop patience (epochs without improvement)
@@ -59,7 +60,7 @@ def predict(model_path, image_path, task='detect', save_path=""):
 def export(path, informat='pt', outformat='onnx', task='detect'):
     if os.path.isfile(path):
         model = YOLO(path, task=task)
-        success = model.export(format=outformat, imgsz=640, batch=1, dynamic=False)
+        success = model.export(format=outformat, imgsz=640, batch=1, dynamic=False, nms=True)
         print(success)
     else:
         models = [os.path.join(path, p) for p in os.listdir(path) if p.endswith(informat)]
@@ -70,8 +71,16 @@ def export(path, informat='pt', outformat='onnx', task='detect'):
 
 
 if __name__ == '__main__':
-    train()
+    # train()
     # predict(
     #     model_path=r"G:\github\ultralyticshub\ultralytics-individual\DETECT-BUBBLE-debug\20250626-000427\weights\best.pt",
     #     image_path=r"H:\dataset\obb\all\images\test_bak"
     # )
+    # export(r"G:\github\ultralyticshub\ultralytics-individual\OBB-EC\20250101-233045\weights\best.pt")
+    torch_export(
+        r"H:\model\yolo11n-p6-seg.pt",
+        output=r"H:\model",
+        version="ultralytics",
+        imgsz=[1280, 1280],
+        max_boxes=150
+    )

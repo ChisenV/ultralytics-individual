@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import copy
 import math
-from typing import List, Optional, Tuple, Union
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -1650,6 +1650,8 @@ class UltralyticsOBB(OBB, BaseUltralyticsHead):
 class UltralyticsSegment(Segment, BaseUltralyticsHead):
     """Ultralytics Segment head for segmentation models."""
 
+    few_outputs = True
+
     def forward(self, x):
         p = self.proto(x[0])  # mask protos
         bs, _, mask_h, mask_w = p.shape
@@ -1673,13 +1675,18 @@ class UltralyticsSegment(Segment, BaseUltralyticsHead):
         selected_mc = mc[bs_indices, det_indices]
         det_masks = torch.einsum('b d n, b n h w -> b d h w', selected_mc, p).sigmoid()
 
-        return (
-            num_dets,
-            det_boxes,
-            det_scores,
-            det_classes,
-            F.interpolate(det_masks, size=(mask_h * 4, mask_w * 4), mode="bilinear", align_corners=False).gt_(0.5).to(torch.uint8),
-        )
+        if self.few_outputs:
+            detects = torch.cat([det_boxes, det_scores.unsqueeze(-1), det_classes.unsqueeze(-1)], dim=-1)
+            det_masks = (det_masks * 255).to(torch.uint8)
+            return detects, det_masks
+        else:
+            return (
+                num_dets,
+                det_boxes,
+                det_scores,
+                det_classes,
+                F.interpolate(det_masks, size=(mask_h * 4, mask_w * 4), mode="bilinear", align_corners=False).gt_(0.5).to(torch.uint8),
+            )
 
 
 class UltralyticsPose(Pose, BaseUltralyticsHead):

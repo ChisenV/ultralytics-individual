@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import random
 from copy import deepcopy
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any
 
 import cv2
 import numpy as np
