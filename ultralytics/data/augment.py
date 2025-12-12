@@ -2068,6 +2068,7 @@ class Format:
         mask_overlap: bool = True,
         batch_idx: bool = True,
         bgr: float = 0.0,
+        angle_ver: str = None,
     ):
         """Initialize the Format class with given parameters for image and instance annotation formatting.
 
@@ -2110,6 +2111,7 @@ class Format:
         self.mask_overlap = mask_overlap
         self.batch_idx = batch_idx  # keep the batch indexes
         self.bgr = bgr
+        self.angle_ver = angle_ver
 
     def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
         """Format image annotations for object detection, instance segmentation, and pose estimation tasks.
@@ -2168,7 +2170,8 @@ class Format:
                 labels["keypoints"][..., 1] /= h
         if self.return_obb:
             labels["bboxes"] = (
-                xyxyxyxy2xywhr(torch.from_numpy(instances.segments)) if len(instances.segments) else torch.zeros((0, 5))
+                xyxyxyxy2xywhr(torch.from_numpy(instances.segments), self.angle_ver)
+                if len(instances.segments) else torch.zeros((0, 5))
             )
         # NOTE: need to normalize obb in xywhr format for width-height consistency
         if self.normalize:

@@ -63,6 +63,10 @@ from .block import (
     ABlock,
     A2C2f,
 )
+from .coder import (
+    PSCoder,
+    UCResolver
+)
 from .conv import (
     CBAM,
     ChannelAttention,
@@ -178,6 +182,7 @@ __all__ = (
     "MaxSigmoidAttnBlock",
     "Pose",
     "Proto",
+    "PSCoder",
     "RTDETRDecoder",
     "RepC3",
     "RepConv",
@@ -200,6 +205,7 @@ __all__ = (
     "YOLODetect",
     "YOLOSegment",
     "YOLOClassify",
+    "UCResolver",
     "UltralyticsDetect",
     "UltralyticsOBB",
     "UltralyticsSegment",

@@ -69,6 +69,10 @@ class OBBTrainer(yolo.detect.DetectionTrainer):
         if weights:
             model.load(weights)
 
+        for m in model.modules():
+            if "OBB" == m.__class__.__name__ and hasattr(m, "coder"):
+                self.args.angle_ver = getattr(m.coder, "ang_ver", None)
+
         return model
 
     def get_validator(self):

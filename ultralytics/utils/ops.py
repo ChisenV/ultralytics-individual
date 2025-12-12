@@ -371,25 +371,33 @@ def xyxyxyxy2xywhr_p(x):
     return torch.tensor(rboxes, device=x.device, dtype=x.dtype) if is_torch else np.asarray(rboxes)
 
 
-def xyxyxyxy2xywhr(x):
+def xyxyxyxy2xywhr(x, ang_ver: str = None):
     """
     Convert batched Oriented Bounding Boxes (OBB) from [xy1, xy2, xy3, xy4] to [xywh, rotation]. Rotation values are
     returned in radians from -pi/2 to pi/2.
 
     Args:
         x (numpy.ndarray | torch.Tensor): Input box corners [xy1, xy2, xy3, xy4] of shape (n, 8).
+        ang_ver (bool): angle version, support [None, 'le90',]
 
     Returns:
         (numpy.ndarray | torch.Tensor): Converted data in [cx, cy, w, h, rotation] format of shape (n, 5).
     """
-    return poly2rbox(x, use_radian=True)
+    if ang_ver is None:
+        return xyxyxyxy2xywhr_p(x)
+    elif isinstance(ang_ver, str) and ang_ver.lower() == 'le90':
+        return poly2rbox(x, use_radian=True)
+    else:
+        raise ValueError(f'ang_ver {ang_ver} is not supported.')
 
 
 def gaussian_label_cpu(label, num_class, u=0, sig=4.0):
     """
-    转换成 CSL Labels：
-        用高斯窗口函数根据角度 θ 的周期性赋予 gt labels 同样的周期性，使得损失函数在计算边界处时可以做到“差值很大但 loss 很小”；
-        并且使得其 labels 具有环形特征，能够反映各个 θ 之间的角度距离
+    Convert to CSL Labels:
+        Apply the Gaussian window function to endow the gt labels with the same periodicity based on
+        the periodicity of the angle θ, so that the loss function can achieve "a large difference but
+        a small loss" when calculating at the boundaries; and make its labels have a circular feature,
+        which can reflect the angular distance between each θ.
     Args:
         label (float32):[1], theta class
         num_class (int): [1], theta class num
@@ -427,11 +435,9 @@ def poly2rbox(x, use_radian=False, use_gaussian=False, num_cls_theta=180, radius
         radius (float32): [1], window radius for Circular Smooth Label, never use.
 
     Returns:
-        use_gaussian True:
-            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ], θ ∈ [-pi/2, pi/2)
-            csl_labels (numpy.ndarray): (num_gts, num_cls_theta)
-        elif
-            rboxes (numpy.ndarray): (num_gts, 5), 5: [cx cy l s θ]
+        rboxes (numpy.ndarray | torch.Tensor), shape (num_gts, 5), the meaning of 5 is [cx cy l s θ],
+            θ ∈ [-pi/2, pi/2) if use_gaussian is True, else θ ∈ [0, 180).
+        csl_labels (numpy.ndarray), shape (num_gts, num_cls_theta), if use_gaussian is True.
     """
     is_torch = isinstance(x, torch.Tensor)
     polys = x.cpu().numpy() if is_torch else x

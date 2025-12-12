@@ -230,6 +230,7 @@ class YOLODataset(BaseDataset):
                 mask_ratio=hyp.mask_ratio,
                 mask_overlap=hyp.overlap_mask,
                 bgr=hyp.bgr if self.augment else 0.0,  # only affect training.
+                angle_ver=hyp.get("angle_ver", default=None),  # using in obb angle encode and decode
             )
         )
         return transforms

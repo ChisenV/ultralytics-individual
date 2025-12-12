@@ -15,7 +15,7 @@ from torch.nn.init import constant_, xavier_uniform_
 from ultralytics.nn.modules.conv import autopad
 from ultralytics.utils import NOT_MACOS14
 from ultralytics.utils.checks import check_version
-from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors, PSCCoder
+from ultralytics.utils.tal import dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import TORCH_1_11, fuse_conv_and_bn, smart_inference_mode
 
 from .block import DFL, SAVPE, BNContrastiveHead, ContrastiveHead, Proto, Residual, SwiGLUFFN
@@ -308,20 +308,23 @@ class OBB(Detect):
         >>> outputs = obb(x)
     """
 
-    def __init__(self, nc: int = 80, ne: int = 1, ch: tuple = (), psc: bool = True):
+    def __init__(self, nc: int = 80, ne: int = 1, coder: str = None, coder_args: list = None, ch: tuple = ()):
         """
         Initialize OBB with number of classes `nc` and layer channels `ch`.
 
         Args:
             nc (int): Number of classes.
             ne (int): Number of extra parameters.
+            coder (str): Name of coder module.
+            coder_args (list): Arguments for coder module.
             ch (tuple): Tuple of channel sizes from backbone feature maps.
         """
         super().__init__(nc, ch)
         self.ne = ne  # number of extra parameters
-        if psc:
-            self.coder = PSCCoder(ns=3, df=True, tm=0.0)
-            self.ne *= self.coder.encode_size  # angle encode size
+        if coder is not None:
+            from ultralytics.nn.modules.coder import PSCoder, UCResolver
+            self.coder = locals()[coder](*coder_args) if coder_args else locals()[coder]()
+            self.ne = self.coder.encode_size  # angle encode size
         c4 = max(ch[0] // 4, self.ne)
         self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, self.ne, 1)) for x in ch)
 
@@ -346,19 +349,21 @@ class OBB(Detect):
         bs = x[0].shape[0]  # batch size
         angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)  # OBB theta logits
         # NOTE: set `angle` as an attribute so that `decode_bboxes` could use it.
-        angle_enc = 2 * angle.sigmoid() - 1  # [-1, 1]
+        angle_enc = angle.sigmoid() * 2 - 1.0  # [-1, 1]
         angle_rad = self.coder.decode(angle_enc, keepdim=True, ne=self.ne // self.coder.encode_size)  # [-π/2, π/2)
         if not self.training:
             self.angle = angle_rad
         x = Detect.forward(self, x)
         if self.training:
-            return x, angle_rad, angle_enc  # angle_rad解码出角度在decode_bboxes使用，angle用于loss计算
+            # The decoded angle `angle_rad` will be used in `decode_bboxes`,
+            # while `angle_enc` will be used in loss calculation.
+            return x, angle_rad, angle_enc
         if self.export:
             return torch.cat([x, angle_rad], 1)
         else:
-            return (torch.cat([x[0], angle_rad], 1), (x[1], angle_rad))
+            return torch.cat([x[0], angle_rad], 1), (x[1], angle_rad)
 
-    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor) -> torch.Tensor:
+    def decode_bboxes(self, bboxes: torch.Tensor, anchors: torch.Tensor, **kwargs) -> torch.Tensor:
         """Decode rotated bounding boxes."""
         return dist2rbox(bboxes, self.angle, anchors, dim=1)
 
@@ -1253,12 +1258,12 @@ class EfficientNMS_TRT(torch.autograd.Function):
     def forward(ctx,
                 boxes,
                 scores,
-                iou_threshold: float = 0.65,
                 score_threshold: float = 0.25,
+                iou_threshold: float = 0.65,
                 max_output_boxes: float = 100,
+                score_activation: int = 0,
                 box_coding: int = 1,
                 background_class: int = -1,
-                score_activation: int = 0,
                 class_agnostic: int = 1,
                 plugin_version: str = '1',
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1275,12 +1280,12 @@ class EfficientNMS_TRT(torch.autograd.Function):
         g,
         boxes,
         scores,
-        iou_threshold: float = 0.65,
         score_threshold: float = 0.25,
-        max_output_boxes: float = 100,
+        iou_threshold: float = 0.65,
+        max_output_boxes: int = 100,
+        score_activation: int = 0,
         box_coding: int = 1,
         background_class: int = -1,
-        score_activation: int = 0,
         class_agnostic: int = 1,
         plugin_version: str = '1',
     ) -> Tuple[torch.Value, torch.Value, torch.Value, torch.Value]:
@@ -1289,12 +1294,12 @@ class EfficientNMS_TRT(torch.autograd.Function):
             boxes,
             scores,
             outputs=4,
-            box_coding_i=box_coding,
-            iou_threshold_f=iou_threshold,
             score_threshold_f=score_threshold,
+            iou_threshold_f=iou_threshold,
             max_output_boxes_i=max_output_boxes,
-            background_class_i=background_class,
             score_activation_i=score_activation,
+            box_coding_i=box_coding,
+            background_class_i=background_class,
             class_agnostic_i=class_agnostic,
             plugin_version_s=plugin_version,
         )
@@ -1308,12 +1313,12 @@ class EfficientRotatedNMS_TRT(torch.autograd.Function):
         ctx,
         boxes,
         scores,
-        iou_threshold: float = 0.65,
         score_threshold: float = 0.25,
-        max_output_boxes: float = 100,
+        iou_threshold: float = 0.65,
+        max_output_boxes: int = 100,
+        score_activation: int = 0,
         box_coding: int = 1,
         background_class: int = -1,
-        score_activation: int = 0,
         class_agnostic: int = 1,
         plugin_version: str = '1',
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1330,12 +1335,12 @@ class EfficientRotatedNMS_TRT(torch.autograd.Function):
         g,
         boxes,
         scores,
-        iou_threshold: float = 0.65,
         score_threshold: float = 0.25,
-        max_output_boxes: float = 100,
+        iou_threshold: float = 0.65,
+        max_output_boxes: int = 100,
+        score_activation: int = 0,
         box_coding: int = 1,
         background_class: int = -1,
-        score_activation: int = 0,
         class_agnostic: int = 1,
         plugin_version: str = '1',
     ) -> Tuple[torch.Value, torch.Value, torch.Value, torch.Value]:
@@ -1344,12 +1349,12 @@ class EfficientRotatedNMS_TRT(torch.autograd.Function):
             boxes,
             scores,
             outputs=4,
-            box_coding_i=box_coding,
-            iou_threshold_f=iou_threshold,
             score_threshold_f=score_threshold,
+            iou_threshold_f=iou_threshold,
             max_output_boxes_i=max_output_boxes,
-            background_class_i=background_class,
             score_activation_i=score_activation,
+            box_coding_i=box_coding,
+            background_class_i=background_class,
             class_agnostic_i=class_agnostic,
             plugin_version_s=plugin_version,
         )
@@ -1363,12 +1368,12 @@ class EfficientIdxNMS_TRT(torch.autograd.Function):
         ctx,
         boxes,
         scores,
-        iou_threshold: float = 0.65,
         score_threshold: float = 0.25,
+        iou_threshold: float = 0.65,
         max_output_boxes: float = 100,
+        score_activation: int = 0,
         box_coding: int = 1,
         background_class: int = -1,
-        score_activation: int = 0,
         class_agnostic: int = 1,
         plugin_version: str = '1',
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1386,12 +1391,12 @@ class EfficientIdxNMS_TRT(torch.autograd.Function):
         g,
         boxes,
         scores,
-        iou_threshold: float = 0.65,
         score_threshold: float = 0.25,
-        max_output_boxes: float = 100,
-        box_coding: int = 1,
-        background_class: int = -1,
+        iou_threshold: float = 0.65,
+        max_output_boxes: int = 100,
         score_activation: int = 0,
+        box_coding: int = 1,
+        background_class: int = -1,  # no background class
         class_agnostic: int = 1,
         plugin_version: str = '1',
     ) -> Tuple[torch.Value, torch.Value, torch.Value, torch.Value, torch.Value]:
@@ -1400,14 +1405,60 @@ class EfficientIdxNMS_TRT(torch.autograd.Function):
             boxes,
             scores,
             outputs=5,
-            box_coding_i=box_coding,
-            iou_threshold_f=iou_threshold,
             score_threshold_f=score_threshold,
+            iou_threshold_f=iou_threshold,
             max_output_boxes_i=max_output_boxes,
-            background_class_i=background_class,
             score_activation_i=score_activation,
+            box_coding_i=box_coding,
+            background_class_i=background_class,
             class_agnostic_i=class_agnostic,
             plugin_version_s=plugin_version,
+        )
+
+
+class ROIAlign_TRT(torch.autograd.Function):
+    """ROIAlign block for YOLO-fused model for TensorRT."""
+
+    @staticmethod
+    def forward(
+        ctx,
+        X,
+        rois,
+        batch_indices,
+        output_height: int = 160,
+        output_width: int = 160,
+        coordinate_transformation_mode: int = 1,
+        mode: int = 1,  # 0: max pooling, 1: average polling
+        sampling_ratio: int = 0,
+        spatial_scale: float = 0.25,
+    ) -> torch.Tensor:
+        return torch.randn((rois.shape[0], X.shape[1], output_height, output_width), device=rois.device, dtype=rois.dtype)
+
+    @staticmethod
+    def symbolic(
+        g,
+        X,
+        rois,
+        batch_indices,
+        output_height: int = 160,
+        output_width: int = 160,
+        coordinate_transformation_mode: int = 1,
+        mode: int = 1,  # 0: max pooling, 1: average polling
+        sampling_ratio: int = 0,
+        spatial_scale: float = 0.25,
+    ) -> torch.Value:
+        return g.op(
+            'TRT::ROIAlign_TRT',
+            X,
+            rois,
+            batch_indices,
+            coordinate_transformation_mode_i=coordinate_transformation_mode,
+            mode_i=mode,
+            output_height_i=output_height,
+            output_width_i=output_width,
+            sampling_ratio_i=sampling_ratio,
+            spatial_scale_f=spatial_scale,
+            # plugin_version_s='2',  # 插件版本为 2
         )
 
 
@@ -1515,6 +1566,41 @@ class YOLOSegment(YOLODetect):
             det_scores,
             det_classes,
             F.interpolate(det_masks, size=(mask_h * 4, mask_w * 4), mode="bilinear", align_corners=False).gt_(0.5).to(torch.uint8),
+        )
+
+    def forward_roi_align(self, x):
+        p = self.proto(x[0])
+        bs, _, mask_h, mask_w = p.shape
+        (num_dets, det_boxes, det_scores, det_classes, det_indices), mc = YOLODetect.forward(self, x)
+
+        # Select mask coefficients for detected boxes
+        bs_indices = torch.arange(bs, device=det_classes.device, dtype=torch.long).unsqueeze(1).expand(bs, self.max_det).reshape(-1)
+        det_indices = det_indices.long().reshape(-1)
+        selected_mc = mc[bs_indices, det_indices]
+
+        # Pool proto features for detected boxes
+        total_dets = self.max_det * bs
+        pooled_proto = ROIAlign_TRT.apply(
+            p,
+            det_boxes.view(total_dets, 4),
+            bs_indices,
+            int(mask_h),
+            int(mask_w),
+        )
+
+        # Compute masks for detected boxes
+        det_masks = (
+            torch.matmul(selected_mc.unsqueeze(1), pooled_proto.view(total_dets, self.nm, -1))
+            .sigmoid()
+            .view(bs, self.max_det, mask_h, mask_w)
+        )
+
+        return (
+            num_dets,
+            det_boxes,
+            det_scores,
+            det_classes,
+            det_masks,
         )
 
 
@@ -1640,6 +1726,54 @@ class UltralyticsSegment(Segment, BaseUltralyticsHead):
                 det_classes,
                 F.interpolate(det_masks, size=(mask_h * 4, mask_w * 4), mode="bilinear", align_corners=False).gt_(0.5).to(torch.uint8),
             )
+
+    def forward_roi_align(self, x):
+        p = self.proto(x[0])  # mask protos
+        bs, _, mask_h, mask_w = p.shape
+        mc = torch.cat([self.cv4[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2).permute(0, 2, 1)  # mask coefficients
+
+        # Detect forward
+        x = [torch.cat((self.cv2[i](x[i]), self.cv3[i](x[i])), 1) for i in range(self.nl)]
+        dbox, cls = self._new_inference(x)
+
+        ## Using transpose for compatibility with EfficientIdxNMS_TRT
+        num_dets, det_boxes, det_scores, det_classes, det_indices = EfficientIdxNMS_TRT.apply(
+            dbox.transpose(1, 2),
+            cls.transpose(1, 2),
+            self.conf_thres,
+            self.iou_thres,
+            self.max_det,
+        )
+
+        # Select mask coefficients for detected boxes
+        bs_indices = torch.arange(bs, device=det_classes.device, dtype=torch.long).unsqueeze(1).expand(bs, self.max_det).reshape(-1)
+        det_indices = det_indices.long().reshape(-1)
+        selected_mc = mc[bs_indices, det_indices]
+
+        # Pool proto features for detected boxes
+        total_dets = self.max_det * bs
+        pooled_proto = ROIAlign_TRT.apply(
+            p,
+            det_boxes.view(total_dets, 4),
+            bs_indices,
+            int(mask_h),
+            int(mask_w),
+        )
+
+        # Compute masks for detected boxes
+        det_masks = (
+            torch.matmul(selected_mc.unsqueeze(1), pooled_proto.view(total_dets, self.nm, -1))
+            .sigmoid()
+            .view(bs, self.max_det, mask_h, mask_w)
+        )
+
+        return (
+            num_dets,
+            det_boxes,
+            det_scores,
+            det_classes,
+            det_masks,
+        )
 
 
 class UltralyticsPose(Pose, BaseUltralyticsHead):
@@ -1833,4 +1967,47 @@ class YOLOESegmentHead(YOLOESegment, YOLOEDetectHead):
             det_scores,
             det_classes,
             F.interpolate(det_masks, size=(mask_h * 4, mask_w * 4), mode="bilinear", align_corners=False).gt_(0.5).to(torch.uint8),
+        )
+
+    def forward_roi_align(self, x, text):
+        p = self.proto(x[0])  # mask protos
+        bs, _, mask_h, mask_w = p.shape
+        mc = torch.cat([self.cv5[i](x[i]).view(bs, self.nm, -1) for i in range(self.nl)], 2)  # mask coefficients
+
+        if hasattr(self, "lrpc"):
+            (num_dets, det_boxes, det_scores, det_classes, det_indices), mask = YOLOEDetectHead.forward(self, x, text, return_mask=True)
+            mc = (mc * mask.int()) if not self.dynamic else mc[..., mask]
+        else:
+            num_dets, det_boxes, det_scores, det_classes, det_indices = YOLOEDetectHead.forward(self, x, text)
+
+        mc = mc.permute(0, 2, 1)
+
+        # Select mask coefficients for detected boxes
+        bs_indices = torch.arange(bs, device=det_classes.device, dtype=torch.long).unsqueeze(1).expand(bs, self.max_det).reshape(-1)
+        det_indices = det_indices.long().reshape(-1)
+        selected_mc = mc[bs_indices, det_indices]
+
+        # Pool proto features for detected boxes
+        total_dets = self.max_det * bs
+        pooled_proto = ROIAlign_TRT.apply(
+            p,
+            det_boxes.view(total_dets, 4),
+            bs_indices,
+            int(mask_h),
+            int(mask_w),
+        )
+
+        # Compute masks for detected boxes
+        det_masks = (
+            torch.matmul(selected_mc.unsqueeze(1), pooled_proto.view(total_dets, self.nm, -1))
+            .sigmoid()
+            .view(bs, self.max_det, mask_h, mask_w)
+        )
+
+        return (
+            num_dets,
+            det_boxes,
+            det_scores,
+            det_classes,
+            det_masks,
         )
