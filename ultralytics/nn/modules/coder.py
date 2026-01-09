@@ -224,19 +224,24 @@ class UCResolver:
 
         return ang_enc
 
-    def decode(self, x: torch.Tensor, keepdim: bool = False) -> torch.Tensor:
+    def decode(self, x: torch.Tensor, keepdim: bool = False, ne: int = 1) -> torch.Tensor:
         """Unit Cycle Resolver.
 
         Args:
             x (Tensor): The encoding state of angle.
                 Has shape (..., num_anchors * H * W, encode_size)
             keepdim (bool): Whether the output tensor has dim retained or not.
+            ne (int): Number of extra parameters, see OBB head
 
         Returns:
             (Tensor): Angle offset for each scale level.
                 Has shape (num_anchors * H * W, 1) when keepdim is true,
                 (num_anchors * H * W) otherwise
         """
+        # Adjust the input dimension: (bs, encode_size, L) -> (bs, L, encode_size)
+        x = x.permute(0, 2, 1)
+        batch_size, L = x.shape[0], x.shape[1]
+        x = x.reshape(-1, x.shape[-1])  # new shape: (bs * L, encode_size)
 
         self.coef_sin = self.coef_sin.to(x)
         self.coef_cos = self.coef_cos.to(x)
@@ -253,7 +258,14 @@ class UCResolver:
         if self.invalid_thr > 0:
             theta[pred_sin ** 2 + pred_cos ** 2 < (self.ns / 2) ** 2 * self.invalid_thr] *= 0
 
-        return theta / 2
+        angle = theta / 2
+
+        if keepdim:
+            angle = angle.view(batch_size, ne, L)  # shape: (bs, 1, L)
+        else:
+            angle = angle.view(batch_size, L)  # shape: (bs, L)
+
+        return angle
 
     def get_restrict_loss(self, x: torch.Tensor, weight, avg_factor) -> torch.Tensor:
         """Unit Cycle Resolver.

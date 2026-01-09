@@ -989,15 +989,15 @@ class v8OBBLoss(v8DetectionLoss):
             fg_mask_flat = fg_mask.view(-1)  # (n,)
             weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
 
-            pa_enc = preds[2].permute(0, 2, 1).contiguous()  # (bs, h*w, 6)
-            pa_enc = pa_enc.view(-1, 6)[fg_mask_flat]  # (n, 6)
+            pa_enc = preds[2].permute(0, 2, 1).contiguous()  # (bs, h*w, encode_size)
+            pa_enc = pa_enc.view(-1, self.coder.encode_size)[fg_mask_flat]  # (n, encode_size)
 
             target_bboxes_selected = target_bboxes.view(-1, 5)[fg_mask_flat]
             ta = target_bboxes_selected[:, 4]  # [num_selected] [-π/2, π/2]
-            ta_enc = self.coder.encode(ta.unsqueeze(-1))  # (n, 6)
-
+            ta_enc = self.coder.encode(ta.unsqueeze(-1))  # (n, encode_size)
             angle_loss = (torch.abs(pa_enc - ta_enc) * weight).sum() / target_scores_sum  # L1
-            loss[0] = loss[0] + 0.5 * angle_loss  # 0.5 is an experience val, can be tuned
+
+            loss[0] = loss[0] + self.hyp.ang * angle_loss  # 0.05 is an experience val, can be tuned
 
         loss[0] *= self.hyp.box  # box gain
         loss[1] *= self.hyp.cls  # cls gain

@@ -101,6 +101,7 @@ warmup_bias_lr: 0.1 # (float) bias learning rate during warmup
 box: 7.5 # (float) box loss gain
 cls: 0.5 # (float) classification loss gain
 dfl: 1.5 # (float) distribution focal loss gain
+ang: 0.05 # (float) angular loss gain
 pose: 12.0 # (float) pose loss gain (pose tasks)
 kobj: 1.0 # (float) keypoint objectness loss gain (pose tasks)
 nbs: 64 # (int) nominal batch size used for loss normalization
@@ -108,10 +109,10 @@ hsv_h: 0.015 # (float) HSV hue augmentation fraction
 hsv_s: 0.7 # (float) HSV saturation augmentation fraction
 hsv_v: 0.4 # (float) HSV value (brightness) augmentation fraction
 degrees: 0.0 # (float) rotation degrees (+/-)
-degrees_p: 0.5 # (float) image rotation (probability)
+degrees_p: 0.5 # (float) image rotation probability
 translate: 0.1 # (float) translation fraction (+/-)
 scale: 0.5 # (float) scale gain (+/-)
-scale_p: 0.5 # (float) image scale (probability)
+scale_p: 0.5 # (float) image scale probability
 shear: 0.0 # (float) shear degrees (+/-)
 perspective: 0.0 # (float) perspective fraction (0–0.001 typical)
 flipud: 0.0 # (float) vertical flip probability

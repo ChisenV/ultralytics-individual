@@ -331,7 +331,7 @@ class OBB(Detect):
     def forward(self, x: list[torch.Tensor]) -> torch.Tensor | tuple:
         """Concatenate and return predicted bounding boxes and class probabilities."""
         if hasattr(self, "coder") and self.coder is not None:
-            return self.forward_psc(x)
+            return self.forward_with_coder(x)
         bs = x[0].shape[0]  # batch size
         angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)  # OBB theta logits
         # NOTE: set `angle` as an attribute so that `decode_bboxes` could use it.
@@ -344,7 +344,7 @@ class OBB(Detect):
             return x, angle
         return torch.cat([x, angle], 1) if self.export else (torch.cat([x[0], angle], 1), (x[1], angle))
 
-    def forward_psc(self, x):
+    def forward_with_coder(self, x):
         """Concatenates and returns predicted bounding boxes and class probabilities."""
         bs = x[0].shape[0]  # batch size
         angle = torch.cat([self.cv4[i](x[i]).view(bs, self.ne, -1) for i in range(self.nl)], 2)  # OBB theta logits
